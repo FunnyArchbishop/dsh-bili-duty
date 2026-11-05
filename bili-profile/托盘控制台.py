@@ -66,6 +66,60 @@ def open_dsh() -> None:
     except Exception:
         pass
 
+# ── 顺带把 DSH 宿主拉起来（2026-11-05 按使用者要求）───────────────────────
+#    宿主 = `dsh web`：插件、定时器、/api/bili-duty/* 都在里面。
+#    宿主没起 ⇒ 值班轮不会自动触发，控制台只能干扫私信。
+_HOST = {"we_started": False}
+
+
+def start_host(wait: float = 45.0) -> str:
+    """没起就起一个（detached，不跟着控制台一起退出）。返回一句话状态。"""
+    if host_up():
+        return "宿主已经在跑"
+    node, dsh = getattr(core, "NODE", "") or "", getattr(core, "DSH_BIN", "") or ""
+    if not (node and dsh and pathlib.Path(node).exists() and pathlib.Path(dsh).exists()):
+        return f"找不到 node 或 dsh（node={node} dsh={dsh}），先在 local.json 里填好"
+    try:
+        flags = 0
+        if os.name == "nt":
+            flags = 0x00000008 | 0x08000000        # DETACHED_PROCESS | CREATE_NO_WINDOW
+        subprocess.Popen(
+            [node, dsh, "web"],
+            cwd=str(pathlib.Path.home()),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+        _HOST["we_started"] = True
+        core.append_log("托盘控制台：启动了 DSH 宿主（dsh web）")
+    except Exception as e:
+        return f"启动宿主失败：{e}"
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        if host_up():
+            return f"宿主已启动（等了 {int(time.time() - t0)} 秒）"
+        time.sleep(0.8)
+    return f"宿主可能没起来（等了 {int(wait)} 秒还是连不上 3080）"
+
+
+def stop_host() -> str:
+    """只关我们起的那个 —— 别把使用者正在用的会话一起掐了"""
+    if not host_up():
+        return "宿主本来就没在跑"
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
+                            creationflags=0x08000000 if os.name == "nt" else 0).stdout
+        pids = {ln.split()[-1] for ln in out.splitlines()
+                if ":3080" in ln and "LISTENING" in ln.upper() or (":3080" in ln and "LISTEN" in ln.upper())}
+        pids = {x for x in pids if x.isdigit()}
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        core.append_log(f"托盘控制台：关闭 DSH 宿主 pid={sorted(pids)}")
+        return f"已关闭宿主（pid {', '.join(sorted(pids)) or '?'}）"
+    except Exception as e:
+        return f"关闭失败：{e}"
+
 
 # ── 轮询线程 ─────────────────────────────────────────────────────────────
 class Poller(threading.Thread):
@@ -120,6 +174,9 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.build()
+        # 一启动就把宿主拉起来（否则值班轮不会跑）；--no-host 可以跳过
+        if "--no-host" not in sys.argv:
+            threading.Thread(target=self.ensure_host, daemon=True).start()
         poller.start()
         root.after(300, self.pump)
         root.after(200, self.refresh)
@@ -140,7 +197,8 @@ class App:
         bar = tk.Frame(self.root)
         bar.pack(fill="x", **pad)
         for text, act in (("立刻扫一次", "scan"), ("打开 DSH", "dsh"),
-                          ("暂停轮询", "toggle"), ("打开报告", "report"), ("刷新", "refresh")):
+                          ("启动宿主", "starthost"), ("暂停轮询", "toggle"),
+                          ("打开报告", "report"), ("刷新", "refresh")):
             tk.Button(bar, text=text, width=10, command=lambda a=act: self.q.put(a)).pack(side="left", padx=2)
 
         # 待追问
@@ -215,6 +273,10 @@ class App:
         elif act == "dsh":
             open_dsh()
             self.flash("已在浏览器打开 DSH（「跑一轮」按钮在那里）")
+        elif act == "starthost":
+            threading.Thread(target=self.ensure_host, daemon=True).start()
+        elif act == "stophost":
+            self.flash(stop_host())
         elif act == "toggle":
             poller.paused = not poller.paused
             self.flash("轮询已暂停" if poller.paused else "轮询已恢复")
@@ -242,6 +304,12 @@ class App:
             poller.scan_once()
             self.scanning = False
         threading.Thread(target=work, daemon=True).start()
+
+    def ensure_host(self):
+        self.flash("正在检查 DSH 宿主…")
+        msg = start_host()
+        self.flash(msg + ("　（本控制台启动的）" if _HOST["we_started"] else ""))
+        core.append_log("托盘：" + msg)
 
     def flash(self, msg: str):
         self.lbl_state.configure(text=msg)
@@ -322,7 +390,8 @@ class App:
         picked = core.count_picked_today(today)
         age = core.last_scan_age()
 
-        host = "宿主在跑" if host_up() else "宿主没跑（值班轮不会自动触发）"
+        host = ("宿主在跑" + ("（本控制台起的）" if _HOST["we_started"] else "")) if host_up() \
+            else "宿主没跑（值班轮不会自动触发）"
         poll_state = "已暂停" if poller.paused else f"每 {POLL_SECONDS} 秒"
         self.lbl_state.configure(
             text=f"今天 {picked} / {cfg.get('perDay', 0)}　关键词 {len(cfg.get('keywords') or [])}　"
@@ -434,6 +503,8 @@ def start_tray(app: App):
         pystray.MenuItem("显示窗口", lambda: app.q.put("show"), default=True),
         pystray.MenuItem("立刻扫一次", lambda: app.q.put("scan")),
         pystray.MenuItem("打开 DSH 网页", lambda: app.q.put("dsh")),
+        pystray.MenuItem("启动宿主（dsh web）", lambda: app.q.put("starthost")),
+        pystray.MenuItem("关闭宿主", lambda: app.q.put("stophost")),
         pystray.MenuItem("暂停/继续轮询", lambda: app.q.put("toggle")),
         pystray.MenuItem("打开报告", lambda: app.q.put("report")),
         pystray.Menu.SEPARATOR,
