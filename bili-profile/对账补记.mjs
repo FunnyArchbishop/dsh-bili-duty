@@ -165,8 +165,24 @@ if (!totalMissing) {
   const verified = await verify(plan.flatMap((p) => p.missing))
   const flagged = [...verified.values()].filter((v) => v.ok === false).length
   for (const p of plan) {
-    if (!existsSync(p.file)) writeFileSync(p.file, `# 刷B站日报 ${p.day}\n`, 'utf8')
-    appendFileSync(p.file, blockFor(p.missing, verified), 'utf8')
+    const block = blockFor(p.missing, verified)
+    if (!existsSync(p.file)) {
+      writeFileSync(p.file, `# 刷B站日报 ${p.day}\n`, 'utf8')
+      appendFileSync(p.file, block, 'utf8')
+      console.log(`  ${p.day}: 判重表 ${p.want} 条 / 报告 ${p.have} 条 ⇒ 补 ${p.missing.length} 条`)
+      continue
+    }
+    // ⚠️ 必须插在**第一个 `## 投递` 之前**：宿主每轮收尾会用 indexOf('## 投递')
+    //    把那个位置之后的全部内容砍掉（index.js L1480-1486）⇒ 追加到末尾等于送死 ✗
+    const cur = readFileSync(p.file, 'utf8')
+    const at = cur.indexOf('## 投递')
+    if (at < 0) {
+      appendFileSync(p.file, block, 'utf8')
+    } else {
+      const head = cur.slice(0, at).replace(/\s*$/, '') + '\n'
+      const tail = cur.slice(at).replace(/^\s*/, '')
+      writeFileSync(p.file, head + block.replace(/^\n+/, '') + '\n' + tail, 'utf8')
+    }
     console.log(`  ${p.day}: 判重表 ${p.want} 条 / 报告 ${p.have} 条 ⇒ 补 ${p.missing.length} 条`)
   }
   console.log(`对账：共补 ${totalMissing} 条` + (flagged ? `，其中 ${flagged} 条 BV 标题对不上（已标 ⚠️）` : ''))
