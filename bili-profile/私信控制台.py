@@ -76,6 +76,7 @@ BILL = WORKSPACE / "刷视频账单.mjs"
 STATE = DUTY / "console-state.json"
 CHATLOG = DUTY / "chat-history.jsonl"      # 私信对话上下文（最近几轮拼进提示词）
 RECONCILE = WORKSPACE / "对账补记.mjs"
+PREF = WORKSPACE / "偏好.mjs"
 CFG = DUTY / "config.json"
 LEDGER = DUTY / "ratings.jsonl"
 SEEN = DUTY / "seen.md"
@@ -961,6 +962,14 @@ async def run(dry: bool, simulate: str | None) -> None:
                 append_log("对账：" + out.replace("\n", " / ")[:200])
         except Exception as e:
             append_log(f"对账跑挂：{e}")
+
+    # ⭐ 把「你设的规矩 + 你回过的判据」渲染进章程 —— 让追问的效果真的传到下一轮
+    #   （2026-11-05：以前标签只写进 判据统计.json，没有任何东西读它 ⇒ 表现成"我回了但没变化"）
+    if PREF.exists() and not dry:
+        try:
+            run_proc([NODE, str(PREF)], timeout=120)
+        except Exception as e:
+            append_log(f"偏好刷新跑挂：{e}")
 
     # 有新消息 ⇒ 顺便跑一次评分（这样纯文字评价也能马上进缓冲区）
     if fresh and SCORING.exists() and not dry:
