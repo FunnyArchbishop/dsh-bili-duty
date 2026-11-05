@@ -7,10 +7,20 @@
 import asyncio
 import importlib.util
 import json
+import os
 import pathlib
 import sys
 
-SRC = pathlib.Path(r"C:\Users\lenovo\.dsh\bili-duty\mcp_server.py")
+# 按 环境变量 > local.json > ~/.dsh/bili-duty 定位（不写死本机路径）
+LOCAL = {}
+try:
+    LOCAL = json.loads((pathlib.Path(__file__).resolve().parent / "local.json").read_text(encoding="utf-8"))
+except Exception:
+    pass
+DUTY = pathlib.Path(os.environ.get("BILI_DUTY_HOME") or LOCAL.get("dutyHome")
+                    or (pathlib.Path.home() / ".dsh" / "bili-duty"))
+
+SRC = DUTY / "mcp_server.py"
 spec = importlib.util.spec_from_file_location("bili_mcp", SRC)
 m = importlib.util.module_from_spec(spec)
 sys.modules["bili_mcp"] = m
@@ -68,7 +78,7 @@ async def real():
     eq("默认规则下这条能过闸", bad, [])
 
     # 临时把上限压到 1 分钟，验证闸门真的会拦（用完还原）
-    pf = pathlib.Path(r"C:\Users\lenovo\.dsh\bili-duty\prefs.json")
+    pf = DUTY / "prefs.json"
     backup = pf.read_text(encoding="utf-8")
     try:
         pf.write_text(json.dumps({**json.loads(backup), "maxDurationMin": 1}, ensure_ascii=False), encoding="utf-8")
