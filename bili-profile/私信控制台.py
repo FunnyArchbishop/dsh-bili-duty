@@ -501,15 +501,19 @@ def cmd_ban(args: list[str]) -> str:
 
 def cmd_help(_args) -> str:
     return (
-        "【刷B站 · 控制台】直接发命令，1 分钟内回你：\n"
-        "/debug 总览（关键词·台账·缓冲区·额度）\n"
-        "/kw 看关键词 ｜ /kw add 词 ｜ /kw del 词\n"
-        "/mute 看排除词 ｜ /mute 词 屏蔽 ｜ /unmute 词 放出\n"
-        "/ban UP名 这个UP一律不推 ｜ /gate 看/改投递闸门\n"
-        "/答 1 3 回答追问（也可以直接说一句）\n"
-        "/list 最近台账 ｜ /last 今天挑了哪些\n"
-        "/buf 缓冲区 ｜ /learn 立刻学一次\n"
-        "/status 额度与窗口 ｜ /cost 今天花多少"
+        "【刷B站 · 私信命令】\n"
+        "我按下面的间隔扫私信，**不是秒回**：托盘控制台开着时 ~15 秒，\n"
+        "只有计划任务时 60 秒。等不了就别用私信 🔻\n"
+        "\n【改状态】设好了就行，延迟无所谓\n"
+        "/kw add|del 词   改搜索关键词\n"
+        "/mute 词 /unmute 词 /ban UP名   屏蔽\n"
+        "/gate maxlen N | minplay N | off   投递闸门\n"
+        "/learn   立刻学一次缓冲区\n"
+        "\n【看一眼】要即时的话去托盘控制台（窗口里点）\n"
+        "/debug 总览 ｜ /status 额度与窗口\n"
+        "/last 今天挑了哪些 ｜ /list 最近台账\n"
+        "/buf 缓冲区 ｜ /cost 今天花多少\n"
+        "/答 1 3 回答追问（也可以直接说一句）"
     )
 
 
@@ -648,14 +652,33 @@ def cmd_status(_args) -> str:
         win = "在「晚上/夜间谷时」窗口里"
     else:
         win = "当前不在窗口（中午 12-14 / 夜间 18-09）"
+    scan = last_scan_age()
     return (
         "【status】\n"
         f"今天：挑 {picked} / 上限 {cfg.get('perDay', 0)}\n"
-        f"每轮上限：12 · 私信批数上限：4\n"
         f"窗口：{win}\n"
-        f"私信投递：{cfg.get('dmMode')} → uid {cfg.get('dmUid')}\n"
-        f"自动评论：{'开' if cfg.get('autoComment') else '关'}｜峰谷：{'开' if cfg.get('peakValley') else '关'}"
+        f"上次扫私信：{scan}\n"
+        f"投递：{cfg.get('dmMode')} → uid {cfg.get('dmUid')}　"
+        f"自动评论：{'开' if cfg.get('autoComment') else '关'}"
     )
+
+
+def last_scan_age() -> str:
+    """距上次扫描多久 —— 私信是异步通道，如实报新鲜度（2026-11-05 ①）"""
+    st = read_json(STATE, {}) or {}
+    t = st.get("lastScan")
+    if not t:
+        return "（还没记过）"
+    try:
+        dt = datetime.datetime.fromisoformat(str(t))
+        sec = int((datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds())
+        if sec < 90:
+            return f"{sec} 秒前"
+        if sec < 5400:
+            return f"{sec // 60} 分钟前"
+        return f"{sec / 3600:.1f} 小时前 ⚠️ 可能已经停了"
+    except Exception:
+        return str(t)
 
 
 def cmd_cost(_args) -> str:
@@ -944,6 +967,13 @@ async def run(dry: bool, simulate: str | None) -> None:
     last_ts = int(st.get("lastTs") or 0)
 
     msgs = await fetch_msgs(20)
+    # ⭐ 心跳：只要**成功拉到私信**就记一次 —— /status 的新鲜度、托盘的存活判断、
+    #    以及"进程是不是静默死了"都靠这个时间戳（2026-11-05 ①③）
+    if not dry:
+        hb = read_json(STATE, {}) or {}
+        hb["lastScan"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        hb["scans"] = int(hb.get("scans") or 0) + 1
+        write_json(STATE, hb)
     incoming = [m for m in msgs if not m["from_me"]]
     if not incoming:
         if not dry:
@@ -1080,6 +1110,7 @@ async def run(dry: bool, simulate: str | None) -> None:
     if not dry:
         merged = read_json(STATE, {}) or {}
         merged["lastTs"] = max(last_ts, newest)
+        merged["lastScan"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
         merged["handled"] = list(handled)[-200:]
         write_json(STATE, merged)
 
