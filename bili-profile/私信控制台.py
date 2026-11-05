@@ -205,12 +205,52 @@ def exclude_words() -> list[str]:
     return list((read_json(CFG, {}) or {}).get("excludeWords") or [])
 
 
+PREFS = DUTY / "prefs.json"
+
+
+def read_prefs() -> dict:
+    return read_json(PREFS, {}) or {}
+
+
+def patch_prefs(**kw) -> dict:
+    cur = read_prefs()
+    cur.update({k: v for k, v in kw.items() if v is not None})
+    write_json(PREFS, cur)
+    return cur
+
+
+def cmd_gate(args: list[str]) -> str:
+    """看/改投递闸门 —— 这一层是**代码级**的：命中就真的发不出去"""
+    cur = read_prefs()
+    num = [a for a in args if re.fullmatch(r"\d+", a or "")]
+    op = (args[0].lower() if args else "")
+    if op in ("maxlen", "len", "时长") and num:
+        c = patch_prefs(maxDurationMin=int(num[0]))
+        return f"时长上限 = {c['maxDurationMin']} 分钟（0 = 不限；合集/课程始终豁免）"
+    if op in ("minplay", "play", "播放") and num:
+        c = patch_prefs(minPlay=int(num[0]))
+        return f"播放量下限 = {c['minPlay']}（0 = 不限）"
+    if op in ("off", "关"):
+        patch_prefs(maxDurationMin=0, minPlay=0)
+        return "时长/播放量限制已关（屏蔽词和屏蔽 UP 还生效，用 /mute /ban /unmute 管）"
+    words = exclude_words()
+    ups = cur.get("banUps") or []
+    return (
+        "【投递闸门】命中就真的发不出去（是拦，不是建议）\n"
+        f"屏蔽词 {len(words)}：{' · '.join(words) or '（空）'}\n"
+        f"屏蔽 UP {len(ups)}：{' · '.join(ups) or '（空）'}\n"
+        f"时长上限 {cur.get('maxDurationMin') or 0} 分钟（0=不限，合集/课程豁免）\n"
+        f"播放量下限 {cur.get('minPlay') or 0}（0=不限）\n"
+        "改：/mute 词 ｜ /ban UP名 ｜ /gate maxlen 60 ｜ /gate minplay 10000 ｜ /gate off"
+    )
+
+
 def cmds():
     return {
         "debug": cmd_debug, "kw": cmd_kw, "list": cmd_list,
         "buf": cmd_buf, "learn": cmd_learn, "last": cmd_last,
         "status": cmd_status, "cost": cmd_cost, "help": cmd_help,
-        "mute": cmd_mute, "unmute": cmd_unmute, "ban": cmd_ban,
+        "mute": cmd_mute, "unmute": cmd_unmute, "ban": cmd_ban, "gate": cmd_gate,
     }
 
 
@@ -292,14 +332,23 @@ def cmd_unmute(args: list[str]) -> str:
 
 
 def cmd_ban(args: list[str]) -> str:
-    """按 UP 名屏蔽（和 /mute 同一套机制：插件会把排除词拿去比对标题/UP/简介）"""
+    """按 UP 名屏蔽：**两处都写** —— excludeWords（进提示词，让模型少挑）
+    和 prefs.json 的 banUps（进投递闸门，代码级拦死）"""
     if not args:
         return "用法：/ban UP名（这个 UP 的一律不推；一个词一个词加，别带空格）"
     before, after, changed = patch_exclude(add=args)
+    cur = read_prefs()
+    ups = list(cur.get("banUps") or [])
+    for a in args:
+        a = a.strip()
+        if a and a not in ups:
+            ups.append(a)
+    patch_prefs(banUps=ups)
     newly = [w for w in args if w in after and w not in before]
     if not newly:
-        return f"{'、'.join(args)} 已经在排除词里了"
-    return f"已屏蔽这个 UP：{'、'.join(newly)}\n（现在排除词共 {len(after)} 个）"
+        return f"{'、'.join(args)} 已经在屏蔽名单里了（现在 UP {len(ups)} 个）"
+    return (f"已屏蔽 UP：{'、'.join(newly)}\n"
+            f"（提示词 + 投递闸门都生效：这个 UP 的视频发不出来）")
 
 
 def cmd_help(_args) -> str:
@@ -308,7 +357,7 @@ def cmd_help(_args) -> str:
         "/debug 总览（关键词·台账·缓冲区·额度）\n"
         "/kw 看关键词 ｜ /kw add 词 ｜ /kw del 词\n"
         "/mute 看排除词 ｜ /mute 词 屏蔽 ｜ /unmute 词 放出\n"
-        "/ban UP名 这个UP一律不推\n"
+        "/ban UP名 这个UP一律不推 ｜ /gate 看/改投递闸门\n"
         "/list 最近台账 ｜ /last 今天挑了哪些\n"
         "/buf 缓冲区 ｜ /learn 立刻学一次\n"
         "/status 额度与窗口 ｜ /cost 今天花多少"

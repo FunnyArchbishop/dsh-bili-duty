@@ -1,0 +1,228 @@
+diff --git a/vendor/bilibili-mcp/mcp_server.py b/vendor/bilibili-mcp/mcp_server.py
+index e555990..b8d9de4 100755
+--- a/vendor/bilibili-mcp/mcp_server.py
++++ b/vendor/bilibili-mcp/mcp_server.py
+@@ -402,7 +402,15 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank", pag
+         num: 返回视频数量，默认10，最大50
+         order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
+         page: 第几页，从 1 开始（一页约 20 条；想多看一屏就翻页）
+-    
++
++    ⚠️ 刷一轮的用法（2026-10-29 使用者反馈"刷来的都有点新、热度不高"之后改的）：
++        · 排序一律用 order="click"（播放量从高到低）—— 热度高的排前面，别用 pubdate 追最新；
++        · 每条都带 pubdate（unix 秒）和 play：**先看这两个数再决定细看谁**，
++          别按返回顺序从头读；
++        · 时间窗放宽到近 30 天：宁可要两三周前、播放量几万甚至几十万的，
++          也别要昨天刚发、播放量三位数的（还没人验证过，评论区也帮不上判断）；
++        · 超过 30 天的老视频，只有"同题材里断层第一"那种热度才值得挑。
++
+     Returns:
+         JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
+     """
+@@ -1149,6 +1157,184 @@ async def bili_favorite_content(media_id: int, page: int = 1, keyword: str = "")
+     }, ensure_ascii=False)
+ 
+ 
++# ========== 发送前「链接体检」（2026-11-05 加）==========
++# 起因：使用者报「第 4 条的链接和描述不匹配」——
++#   私信里写《【东方原曲合集】793P》，链接却是 BV1ms411m7Pf，
++#   而这条 BV 实际是《【兽人】I GOT YOU》（2015 年、2.2 万播放、转自 youtube）；
++#   正确的那条是 **BV1Ms411m7Pf**（大写 M）——《【东方原曲合集】正作…共793P》，366 万播放。
++# ⇒ B站 BV 号**大小写敏感**，模型重打一遍就会指到另一个真实存在的视频 ✗
++#   （光靠"这串 BV 存不存在"抓不到：错的写法也指向一个真视频）
++# ⇒ 所以在真正发出去之前，把文本里每个 BV 都拿**真标题**核一遍：
++#   与私信里那段文字的相似度太低 ⇒ 拒发，并把「链接实际是什么」回给模型让它自己改 ✓
++# ⚠️ 一律 fail-open：网络 / 接口 / 解析任何一步出错都放行，绝不因为体检把投递搞挂。
++
++_BV_TOKEN = re.compile(r"BV[0-9A-Za-z]{10}")
++_ITEM_START = re.compile(r"\[\d{1,2}\]")
++
++
++def _squash(s: str) -> str:
++    """只留字母/数字（含中日韩）、全小写 —— 比较前把标点/空格/emoji 抹平"""
++    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
++
++
++def _lcs_len(a: str, b: str) -> int:
++    """最长公共子序列长度（串都很短，O(n·m) 够用）"""
++    if not a or not b:
++        return 0
++    prev = [0] * (len(b) + 1)
++    for ca in a:
++        cur = [0]
++        for j, cb in enumerate(b, 1):
++            cur.append(prev[j - 1] + 1 if ca == cb else max(prev[j], cur[-1]))
++        prev = cur
++    return prev[-1]
++
++
++def _title_match_ratio(block: str, title: str) -> float:
++    """私信里那段文字 vs 链接真实标题的匹配度 = LCS / 较短串长度。
++    实测：写【东方原曲合集】793P 对真标题 ≈ 0.67（过）；
++          写【东方原曲合集】793P 对《【兽人】I GOT YOU》≈ 0.0（拦）。
++    阈值 0.35 以下是「写的标题和链接指向的根本不是一个东西」。
++    """
++    a, b = _squash(block), _squash(title)
++    if not a or not b:
++        return 1.0
++    return _lcs_len(a, b) / min(len(a), len(b))
++
++
++def _item_blocks(text: str) -> list:
++    """按 `[1]` `[2]` … 切条目块；没有编号就整段算一块（保底）"""
++    starts = [m.start() for m in _ITEM_START.finditer(text)]
++    if not starts:
++        return [text]
++    return [text[s:e] for s, e in zip(starts, starts[1:] + [len(text)])]
++
++
++async def _fetch_meta(bvid: str) -> dict:
++    """拿一条 BV 的真实元信息（BV 不存在 / 稿件不可见会抛）。
++    ⚠️ 这个接口**一次就把标题、时长、播放量、UP 名全返回了** —— 所以后面的
++    投递闸门是零额外请求成本（体检本来就要查它）。"""
++    cred = load_credential()
++    v = video.Video(bvid=bvid, credential=cred)
++    info = await v.get_info()
++    stat = info.get("stat") or {}
++    owner = info.get("owner") or {}
++    return {
++        "title": str(info.get("title") or ""),
++        "duration": float(info.get("duration") or 0),
++        "view": int(stat.get("view") or 0),
++        "up": str(owner.get("name") or ""),
++        "pages": int(info.get("videos") or 1),
++    }
++
++
++async def _fetch_title(bvid: str) -> str:
++    return (await _fetch_meta(bvid))["title"]
++
++
++# ── 投递闸门（2026-11-05）：把「你说过的规矩」从提示词级升级成**代码级** ──────
++# 章程里写的排除词只是"建议模型遵守"；这里是在**真正发出去之前**逐条查证，
++# 命中就拒发。数据全部来自上面那个 view 接口，零额外请求。
++#
++# ⚠️ 设计约束：**只拦使用者明确说过的，不拦我猜的**。
++#   所以 `maxDurationMin` / `minPlay` 默认都是 0 = 关；/mute /ban 直接复用
++#   config.json 的 `excludeWords`（一个数据源，同时进提示词和闸门）。
++_COLLECTION = re.compile(r"合集|全集|课程|教程|全套|部曲|连载|系列|\d+\s*[Pp]|\d+\s*集")
++
++
++def _is_collection(meta: dict) -> bool:
++    """合集/课程类豁免时长限制 —— 你给 793P 的东方原曲合集打过分，那玩意儿 2800 分钟"""
++    return int(meta.get("pages") or 1) > 1 or bool(_COLLECTION.search(meta.get("title") or ""))
++
++
++def _prefs() -> dict:
++    """闸门规则：词/UP 复用 excludeWords；时长/播放量来自 prefs.json（默认 0 = 关）"""
++    words: list = []
++    try:
++        cfg = json.loads((DUTY_HOME / "config.json").read_text(encoding="utf-8"))
++        words = [str(w).strip() for w in (cfg.get("excludeWords") or []) if str(w).strip()]
++    except Exception:
++        pass
++    extra = {}
++    try:
++        extra = json.loads((DUTY_HOME / "prefs.json").read_text(encoding="utf-8"))
++    except Exception:
++        extra = {}
++    return {
++        "words": words,
++        "ups": [str(u).strip() for u in (extra.get("banUps") or []) if str(u).strip()],
++        "maxDurationMin": int(extra.get("maxDurationMin") or 0),
++        "minPlay": int(extra.get("minPlay") or 0),
++    }
++
++
++def _gate_one(meta: dict, p: dict) -> str:
++    """返回拒绝理由（空串 = 通过）"""
++    title, up = meta.get("title") or "", meta.get("up") or ""
++    dur, view = float(meta.get("duration") or 0), int(meta.get("view") or 0)
++    for w in p["words"]:
++        if not w:
++            continue
++        # ⚠️ 词也要比 UP 名：`/ban 某UP` 就是往 excludeWords 里塞一个词，
++        #    只比标题的话闸门根本拦不住它（2026-11-05 自查发现的漏洞）
++        if w in title:
++            return f"标题含你屏蔽的词「{w}」"
++        if w in up:
++            return f"UP 是「{up}」（含你屏蔽的词「{w}」）"
++    for u in p["ups"]:
++        if u and u.lower() in up.lower():
++            return f"UP 是「{up}」，你屏蔽了这个 UP"
++    if p["maxDurationMin"] and dur > p["maxDurationMin"] * 60 and not _is_collection(meta):
++        return f"时长 {round(dur / 60)} 分钟，超过你设的 {p['maxDurationMin']} 分钟上限（合集/课程可豁免）"
++    if p["minPlay"] and view < p["minPlay"]:
++        return f"播放 {view}，低于你设的下限 {p['minPlay']}"
++    return ""
++
++
++async def _delivery_check(text: str) -> list:
++    """发送前的两道闸，返回要模型改的问题清单（空 = 全对）
++    ① 链接体检：段落文字 vs 真实标题（BV 大小写敏感，只差一个字母就是另一个视频）
++    ② 投递闸门：你设的硬规则（屏蔽词 / 屏蔽UP / 时长上限 / 播放量下限）
++    """
++    problems = []
++    checked = 0
++    title_bad = 0
++    gate_bad = 0
++    p = _prefs()
++    for block in _item_blocks(text):
++        bvs = _BV_TOKEN.findall(block)
++        if not bvs:
++            continue
++        # 把链接和编号从 block 里剔掉，剩下的才是「标题 + 理由」
++        prose = _BV_TOKEN.sub(" ", _ITEM_START.sub(" ", re.sub(r"https?://\S+", " ", block)))
++        for bvid in bvs:
++            if checked >= 12:      # 一轮最多核 12 条，别把发送拖成慢活
++                return problems
++            checked += 1
++            await _throttle()
++            try:
++                meta = await _fetch_meta(bvid)
++            except Exception:
++                problems.append(f"{bvid} 查不到（BV 可能打错了）")
++                title_bad += 1
++                continue
++            why = _gate_one(meta, p)
++            if why:
++                problems.append(f"{bvid}《{meta['title'][:26]}》{why} —— 这条别发，换一条")
++                gate_bad += 1
++                continue
++            ratio = _title_match_ratio(prose, meta["title"])
++            if ratio < 0.35:
++                problems.append(f"{bvid} 实际是《{meta['title'][:40]}》，跟你这段文字对不上（相似度 {ratio:.2f}）")
++                title_bad += 1
++    # 兜底 fail-open：整篇标题全对不上、且没有任何闸门命中 ⇒ 多半是体检自己出问题（接口抽风）
++    # ⚠️ 闸门命中**绝不** fail-open —— 那是确定性判断，不是网络依赖
++    if checked >= 4 and gate_bad == 0 and title_bad == checked:
++        print("[bili-duty] 链接体检：全部条目都不匹配 ⇒ 判定为体检自身异常，放行", file=sys.stderr)
++        return []
++    return problems
++
++
+ # ========== Tool 21: 发私信 ==========
+ 
+ @tool()
+@@ -1170,6 +1356,21 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
+     if not text or not text.strip():
+         return json.dumps({"success": False, "error": "text 不能为空"}, ensure_ascii=False)
+ 
++    # ⭐⭐ 2026-11-05：发出去之前过两道闸 —— 链接体检（BV 大小写）+ 投递闸门（你设的硬规则）
++    try:
++        bad = await _delivery_check(text.strip())
++    except Exception as e:
++        bad = []
++        print(f"[bili-duty] 链接体检出错（已放行）：{e}", file=sys.stderr)
++    if bad:
++        return json.dumps({
++            "success": False,
++            "error": f"有 {len(bad)} 条链接跟标题对不上，**这条私信没发**，先改再发：" + "；".join(bad),
++            "hint": "BV 号**大小写敏感** —— BV1Ms411m7Pf 和 BV1ms411m7Pf 是两个完全不同的视频。"
++                    "请回到 bili_search / bili_subtitle / bili_frames 的返回里**逐字复制**正确的 BV 再写，"
++                    "或者把标题改成链接实际指向的那个视频。改完重新调一次 bili_send_message。",
++        }, ensure_ascii=False)
++
+     try:
+         result = await session.send_msg(
+             credential=cred,

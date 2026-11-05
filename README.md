@@ -75,8 +75,9 @@
 ```bash
 dsh plugin --profile web add dsh-bili-scroll
 dsh plugin --profile web add dsh-video-storyboard
+python patches/应用补丁.py            # ← 给插件的 mcp_server.py 打上我们的两道闸
 # 扫码登录 B站（小号），凭证落在 ~/.dsh/bili-duty/bili_credential.json
-# 按 patches/cordis.patch.example.yml.md 建最小权限 profile：~/.dsh/profiles/bili-duty/
+# profile 补丁由上面的脚本铺到 ~/.dsh/profiles/bili-duty/cordis.patch.yml
 cp bili-profile/local.example.json bili-profile/local.json   # 填 uid 和路径
 
 node bili-profile/评分.mjs --list
@@ -108,6 +109,21 @@ Register-ScheduledTask -TaskName 'DSH-BiliDuty' `
 `测评分.mjs` / `测控制台.py` | 自测（22 项 / 20 项，不联网） |
 `演练缓冲学习.mjs` | 在临时沙箱里演练缓冲区学习 |
 `dump-session.mjs` / `看工具结果.mjs` / `看私信*.mjs` | 排查用查看器 |
+
+### 对上游的补丁（`patches/`）
+
+上游插件只改**一个文件**，所以不整体 fork，做成可重放的补丁：
+
+| | |
+|---|---|
+`patches/mcp_server/patched.py` | 我们维护的版本，**改这里就等于改补丁** |
+`patches/mcp_server/mcp_server.patch` | 与上游基线的 unified diff（+202 / −1 行） |
+`patches/应用补丁.py` | `--check` / 应用 / `--revert`，比 sha256 判断"可应用 / 已应用 / 上游变了" |
+`patches/生成补丁集.py` | 上游升级后重跑，刷新 diff 与指纹 |
+`patches/cordis.patch.yml` | 值班轮最小权限 profile |
+
+改的两块：`bili_search` 的按播放量搜法说明 + 发私信前的**两道闸**（链接体检 / 投递闸门）。
+详见 `patches/README.md`。
 
 ---
 

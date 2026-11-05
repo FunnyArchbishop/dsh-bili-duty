@@ -1,0 +1,3 @@
+# 上游基线 / 我们打完后 的指纹。应用补丁.py 拿它判断「可应用 / 已应用 / 上游变了」
+base    324695044cbe02dda37635aff727117caf6bebbca2ee7635d830aa30b7af0bda
+patched 34c462354aa2b18aeab39faacdd9fa87c5b45b146e3150aae491795f7c74ec49
