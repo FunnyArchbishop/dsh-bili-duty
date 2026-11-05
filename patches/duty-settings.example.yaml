@@ -1,0 +1,64 @@
+# 值班轮（刷视频）专用 settings —— 只有 bili-duty profile 读它
+#
+# 为什么单独一份：
+#   `agent-default-model` 是「settings 用户层 > 组合配置」——
+#   只要 ~/.dsh/settings.yaml 里写了 agent-default-model，overlay 里的
+#   `- id: agent-default-model` 就永远被盖掉。
+#   而 --patch overlay 没法改 settings 文件路径，profile patch 可以
+#   （`- id: settings / config.path`）⇒ 值班轮读这份，主会话照旧读
+#   ~/.dsh/settings.yaml，两边互不影响。
+#
+# 用法：存成 ~/.dsh/bili-duty/duty-settings.yaml，再在 profile 里指过去。
+# 下面用「第三方 OpenAI 兼容网关」举例 —— 换成本地/官方路由把 provider 改名即可。
+
+agent-default-model:
+  provider: tsinghua-api
+  model: DeepSeek-V4-Flash-Vision-Exp
+  reasoningEffort: high
+
+# 值班轮不给它放权：它本来就只有 B站 MCP 那几只只读工具
+permission:
+  defaultPreset: read-only
+
+# ⚠️ 换了 settings 文件之后，`llm-pi-ai` 的 provider 路由也要在这份里重新声明 ——
+#    它同样走 settings 用户层读；缺了这段那一轮直接
+#    `NO_ADAPTER: no adapter registered for provider "tsinghua-api"` 起不来。
+llm-pi-ai:
+  providers:
+    tsinghua-api:
+      displayName: 第三方网关
+      apiKeyEnv: TSINGHUA_API_API_KEY      # key 走凭据库，不写在这里
+      api: openai-completions
+      baseURL: https://llmapi.paratera.com/v1
+      defaultContextWindow: 1048576
+      models:
+        - id: DeepSeek-V4-Flash-Vision-Exp
+          name: DeepSeek-V4-Flash-Vision-Exp
+          # ⚠️ 这类网关的 /v1/models 不报模态 ⇒ 必须手写，
+          #    否则 bili_cover / bili_frames 会以 image_skip_reason: model_no_image 直接跳过画面
+          input:
+            - text
+            - image
+          # ⚠️ 不写 reasoningEfforts，DSH 认为这个模型不支持思考档位，
+          #    那一轮直接 UNSUPPORTED_REASONING_EFFORT 起不来
+          reasoningEfforts:
+            off:
+            low: low
+            medium: medium
+            high: high
+            max: max
+        - id: DeepSeek-V4-Flash-0731
+          name: DeepSeek-V4-Flash-0731
+          reasoningEfforts:
+            off:
+            high: high
+            max: max
+        - id: DeepSeek-V4-Pro-0813
+          name: DeepSeek-V4-Pro
+          input:
+            - text
+            - image
+          reasoningEfforts:
+            off:
+            high: high
+            max: max

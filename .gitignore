@@ -1,0 +1,42 @@
+# ⚠️ 规则必须单独占一行：git 只把行首的 # 当注释，行尾的 # 会被当成规则的一部分（写错过一次）
+
+# ── 个人数据，绝不进仓库 ────────────────────────────────────────────────
+local.json
+persona.md
+画像.md
+画像-长跨度分析.md
+BASELINE.json
+raw-*.tsv
+raw-*.txt
+今日私信.txt
+bili-duty-config.json
+duty.md
+console-launch.vbs
+
+# ── 运行时产物 ──────────────────────────────────────────────────────────
+ratings.jsonl
+seen.md
+chat-history.jsonl
+console-state.json
+scoring-state.json
+keyword-log.jsonl
+*.log
+out/
+digest/
+reports/
+
+# ── 一次性开发脚本（留在本地，不发布）──────────────────────────────────
+bili-profile/_dev/
+
+# ── 上游插件：各自是独立仓库，不套进来 ──────────────────────────────────
+dsh-bili-scroll/
+dsh-video-storyboard/
+
+# ── 会话导出 / 依赖 / 临时文件 ─────────────────────────────────────────
+dsh-session-*.zip
+profiles/
+node_modules/
+*.bak-*
+.venv/
+uv-python/
+__pycache__/

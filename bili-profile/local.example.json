@@ -1,0 +1,11 @@
+{
+  "_说明": "复制成 local.json 再填。local.json 已被 .gitignore 挡住，不会进仓库。",
+  "_优先级": "环境变量 > local.json > 代码里的默认值",
+  "ownerUid": 0,
+  "dutyHome": "",
+  "workspace": "",
+  "nodeExe": "node",
+  "dshBin": "",
+  "pythonExe": "python",
+  "dmLib": ""
+}
