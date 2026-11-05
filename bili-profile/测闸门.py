@@ -62,7 +62,8 @@ print("\n=== ② _prefs 读到的规则 ===")
 p = m._prefs()
 print("   words:", p["words"])
 print("   banUps:", p["ups"], " maxDurationMin:", p["maxDurationMin"], " minPlay:", p["minPlay"])
-eq("默认时长/播放量都是关的", (p["maxDurationMin"], p["minPlay"]), (0, 0))
+print("   （现场值可能是你用 /gate 设过的，这里只校验类型）")
+eq("时长/播放量都是整数", (isinstance(p["maxDurationMin"], int), isinstance(p["minPlay"], int)), (True, True))
 eq("词来自 config.json 的 excludeWords", len(p["words"]) > 0, True)
 
 
@@ -74,8 +75,16 @@ async def real():
 
     text = ("今天挑了 1 条：\n[1] 泰拉瑞亚 32位RISC-V CPU\n"
             "https://b23.tv/BV19Kjf6cEh8 · 原版电路搭CPU\n")
-    bad = await m._delivery_check(text)
-    eq("默认规则下这条能过闸", bad, [])
+    # 先强制一份「规则全关」的 prefs 再测（不依赖现场配置）
+    pf0 = DUTY / "prefs.json"
+    backup0 = pf0.read_text(encoding="utf-8")
+    pf0.write_text(json.dumps({"banUps": [], "maxDurationMin": 0, "minPlay": 0}, ensure_ascii=False),
+                   encoding="utf-8")
+    try:
+        bad = await m._delivery_check(text)
+        eq("规则全关时这条能过闸", bad, [])
+    finally:
+        pf0.write_text(backup0, encoding="utf-8")
 
     # 临时把上限压到 1 分钟，验证闸门真的会拦（用完还原）
     pf = DUTY / "prefs.json"
@@ -88,8 +97,10 @@ async def real():
         print("     理由：", bad2[0])
     finally:
         pf.write_text(backup, encoding="utf-8")
+    # 还原后：行为应回到「配置写了什么就是什么」（现场可能本来就设了上限，别假设是 0）
+    eq("还原后 prefs 回到原值", m._prefs()["maxDurationMin"], json.loads(backup)["maxDurationMin"])
     bad3 = await m._delivery_check(text)
-    eq("还原后又能过", bad3, [])
+    eq("还原后行为与配置一致", bool(bad3), m._prefs()["maxDurationMin"] > 0)
 
 
 asyncio.run(real())

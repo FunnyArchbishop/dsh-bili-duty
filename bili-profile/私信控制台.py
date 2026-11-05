@@ -81,7 +81,17 @@ LEDGER = DUTY / "ratings.jsonl"
 SEEN = DUTY / "seen.md"
 OUT = DUTY / "out"
 
-DM_LIMIT = 480          # 单条私信的字数上限（实测 500 会顶；留点余量）
+DM_LIMIT = 480
+
+# ⭐ --simulate 是**只读预览**：所有改配置的函数都要能被它拦住
+#   （踩过：演练 `/gate maxlen 60` 把真值写进去了 ✗）
+SIMULATE = False
+
+def _persist(path, obj) -> None:
+    if SIMULATE:
+        return
+    write_json(path, obj)
+          # 单条私信的字数上限（实测 500 会顶；留点余量）
 MAX_CHUNKS = 4
 
 NODE = os.environ.get("BILI_NODE") or LOCAL.get("nodeExe") or "node"
@@ -156,7 +166,7 @@ def patch_keywords(add=(), remove=()) -> tuple[list[str], list[str], list[str]]:
         s = cfg.get("_set")
         if isinstance(s, list) and "keywords" not in s:
             s.append("keywords")
-        write_json(CFG, cfg)
+        _persist(CFG, cfg)
         try:
             with (DUTY / "keyword-log.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({
@@ -189,7 +199,7 @@ def patch_exclude(add=(), remove=()) -> tuple[list[str], list[str], list[str]]:
         s = cfg.get("_set")
         if isinstance(s, list) and "excludeWords" not in s:
             s.append("excludeWords")
-        write_json(CFG, cfg)
+        _persist(CFG, cfg)
         try:
             with (DUTY / "keyword-log.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({
@@ -352,7 +362,7 @@ def read_prefs() -> dict:
 def patch_prefs(**kw) -> dict:
     cur = read_prefs()
     cur.update({k: v for k, v in kw.items() if v is not None})
-    write_json(PREFS, cur)
+    _persist(PREFS, cur)
     return cur
 
 
@@ -1059,6 +1069,8 @@ def main() -> None:
     dry = "--dry" in sys.argv
     sim = None
     if "--simulate" in sys.argv:
+        global SIMULATE
+        SIMULATE = True            # 预览模式：只读，不落盘
         i = sys.argv.index("--simulate")
         sim = sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
     if "--simulate-chat" in sys.argv:
