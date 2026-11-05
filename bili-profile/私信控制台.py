@@ -208,6 +208,143 @@ def exclude_words() -> list[str]:
 PREFS = DUTY / "prefs.json"
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  追问：11/-1 分但提不出词时，把候选摆到你面前（2026-11-05 加）
+# ══════════════════════════════════════════════════════════════════════════
+# 由 评分.mjs 写 待追问.json；这里负责：发出去 → 收你的回答 → 落到关键词 / 判据统计。
+# 回法：`1 3`（裸数字，只有存在挂起问题时才当答案）、`/答 1 3`、或直接说一句。
+ASK_FILE = DUTY / "待追问.json"
+TAGSTAT = DUTY / "判据统计.json"
+ASK_TIMEOUT_H = 24
+
+
+def read_ask():
+    q = read_json(ASK_FILE, None)
+    if not isinstance(q, dict) or q.get("answered"):
+        return None
+    try:
+        ts = datetime.datetime.fromisoformat(str(q.get("at")).replace("Z", "+00:00"))
+        if (datetime.datetime.now(datetime.timezone.utc) - ts).total_seconds() > ASK_TIMEOUT_H * 3600:
+            return None      # 过期就静默丢掉，不追问第二遍
+    except Exception:
+        pass
+    return q
+
+
+def write_ask(q) -> None:
+    write_json(ASK_FILE, q)
+
+
+def format_ask(q: dict) -> str:
+    kind = "好在哪" if q.get("kind") == "good" else "差在哪"
+    tags = q.get("tags") or []
+    words = q.get("words") or []
+    if not tags and not words:
+        return ""
+    lines = [f"《{str(q.get('title') or '')[:26]}》记了 {q.get('score')} 分，但我没抓到搜索方向。",
+             f"{kind}？回数字，可多选：", ""]
+    if tags:
+        lines.append("【" + ("怎么好" if q.get("kind") == "good" else "差在哪") + "】" +
+                     "  ".join(f"{i + 1} {t}" for i, t in enumerate(tags)))
+    if words:
+        base = len(tags)
+        lines.append("【加哪个词】" + "  ".join(f"{base + i + 1} {w}" for i, w in enumerate(words)))
+    lines += ["", "也可以直接说一句，我自己提炼。"]
+    return "\n".join(lines)
+
+
+ASK_NUMS = re.compile(r"^[\d\s,，、+＋]+$")
+
+
+def to_half(s: str) -> str:
+    """全角 → 半角，**等长映射**（中文标点保持不变）。
+    ⚠️ 不能用 unicodedata.normalize('NFKC')：它会把中文逗号 `，` 改成 `,`，
+       等于篡改使用者原话（评分.mjs 那边踩过同一个坑）"""
+    out = []
+    for ch in str(s or ""):
+        o = ord(ch)
+        if 0xFF01 <= o <= 0xFF5E:          # 全角 ASCII
+            out.append(chr(o - 0xFEE0))
+        elif ch == "\u3000":               # 全角空格
+            out.append(" ")
+        elif ch == "\u2212":               # 数学减号
+            out.append("-")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def parse_ask_answer(text: str, q: dict):
+    """返回 ('nums', [1,3]) / ('text', '自己的话') / None（不是回答）
+    ⚠️ 打分（`1=10 3=9` / `4 调色板真舒服`）**必须原样放行**，不能被当成"自由文本回答"吞掉
+    ⚠️ 自由文本要返回**原话**（只归一化用于判断，不改写）
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    t = to_half(raw)
+    if t.startswith(("/答", "/a ", "/answer")):
+        t = re.sub(r"^/(答|a|answer)\s*", "", t).strip()
+        if not t:
+            return None
+    if ASK_NUMS.match(t):
+        nums = [int(x) for x in re.findall(r"\d+", t)]
+        return ("nums", nums) if nums else None
+    if REVIEW_PAIR.search(t) or REVIEW_TEXT.match(t):
+        return None                       # 这是打分，交给 评分.mjs
+    return ("text", raw)
+
+
+def record_ask_answer(q: dict, kind: str, value, dry: bool) -> str:
+    tags = list(q.get("tags") or [])
+    words = list(q.get("words") or [])
+    picked_tags, picked_words, note = [], [], ""
+    if kind == "nums":
+        for n in value:
+            if 1 <= n <= len(tags):
+                picked_tags.append(tags[n - 1])
+            elif len(tags) < n <= len(tags) + len(words):
+                picked_words.append(words[n - 1 - len(tags)])
+        if not picked_tags and not picked_words:
+            return f"这几个编号对不上（有效范围 1~{len(tags) + len(words)}），再发一次？"
+    else:
+        note = str(value)[:60]
+
+    if not dry:
+        if picked_tags:
+            stats = read_json(TAGSTAT, {}) or {}
+            for t in picked_tags:
+                stats[t] = int(stats.get(t, 0)) + 1
+            write_json(TAGSTAT, stats)
+        if picked_words:
+            patch_keywords(add=picked_words)
+        q["answered"] = True
+        q["answer"] = {"tags": picked_tags, "words": picked_words, "text": note,
+                       "at": now_bj().isoformat(timespec="seconds")}
+        write_ask(q)
+        append_log(f"追问已回答 {q.get('bvid')}：tags={picked_tags} words={picked_words} text={note[:20]}")
+        # 自由文本 ⇒ 交给 评分.mjs 用真正的提词逻辑提炼一次（幂等，带 applied 标记）
+        if note and SCORING.exists():
+            try:
+                r = run_proc([NODE, str(SCORING), '--ask-apply'], timeout=120)
+                out = (r.stdout or '').strip()
+                if out:
+                    append_log("追问提炼：" + out.replace("\n", " / ")[:160])
+            except Exception as e:
+                append_log(f"追问提炼跑挂：{e}")
+
+    bits = []
+    if picked_tags:
+        bits.append("记住了：" + "、".join(picked_tags) + "（以后就用它判断好不好）")
+    if picked_words:
+        bits.append("关键词加了：" + "、".join(picked_words))
+    if note:
+        bits.append(f"收到「{note}」——下次按这个方向再提炼")
+    if not bits:
+        bits.append("收到，只记分不改进关键词。")
+    return "\n".join(bits)
+
+
 def read_prefs() -> dict:
     return read_json(PREFS, {}) or {}
 
@@ -358,6 +495,7 @@ def cmd_help(_args) -> str:
         "/kw 看关键词 ｜ /kw add 词 ｜ /kw del 词\n"
         "/mute 看排除词 ｜ /mute 词 屏蔽 ｜ /unmute 词 放出\n"
         "/ban UP名 这个UP一律不推 ｜ /gate 看/改投递闸门\n"
+        "/答 1 3 回答追问（也可以直接说一句）\n"
         "/list 最近台账 ｜ /last 今天挑了哪些\n"
         "/buf 缓冲区 ｜ /learn 立刻学一次\n"
         "/status 额度与窗口 ｜ /cost 今天花多少"
@@ -821,7 +959,46 @@ async def run(dry: bool, simulate: str | None) -> None:
         except Exception as e:
             print("评分脚本跑挂了（忽略）：", e)
 
+    # ⭐ 有挂起的追问就先问出去（一次只挂一个，问过就标 asked）
+    q0 = read_ask()
+    if q0 and not q0.get("asked"):
+        body = format_ask(q0)
+        if body:
+            for p in chunk(body):
+                if dry:
+                    print("---- 追问预览 ----\n" + p)
+                else:
+                    await send_dm(p)
+                    await asyncio.sleep(1.0)
+            if not dry:
+                q0["asked"] = True
+                q0["askedAt"] = now_bj().isoformat(timespec="seconds")
+                write_ask(q0)
+                append_log(f"发出追问：{q0.get('bvid')}")
+            print(f"[追问] {q0.get('bvid')} 已发出")
+
     for m in fresh:
+        # ⭐ 先看是不是在回答追问（裸数字只在「已经问出去」时才当答案）
+        qa = read_ask()
+        explicit = m["text"].lstrip().startswith(("/答", "/answer"))
+        if explicit and not qa:
+            reply = "现在没有要回答的问题。打分直接发 `1=10 3=9` 就行。"
+        elif qa and (explicit or qa.get("asked")):
+            ans = parse_ask_answer(m["text"], qa)
+            reply = record_ask_answer(qa, ans[0], ans[1], dry) if ans else None
+        else:
+            reply = None
+        if reply is not None:
+            print(f"[{m['ts']}] 追问回答 → {reply.replace(chr(10), ' ')[:40]}")
+            for p in chunk(reply):
+                if dry:
+                    print("---- 预览 ----\n" + p)
+                else:
+                    await send_dm(p)
+                    await asyncio.sleep(1.0)
+            handled.add(m["key"])
+            continue
+
         cmd = parse_command(m["text"])
         if not cmd:
             # 不是命令 ⇒ 评价就静静记账（评分.mjs 已经跑过），其余当**简化版对话**回一句

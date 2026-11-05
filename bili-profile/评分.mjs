@@ -171,6 +171,94 @@ function extractGoodKeywords(reason, title, up, existing) {
   return out
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+//  追问：提不出词的 11 / -1 分，别静默失败（2026-11-05 加）
+// ══════════════════════════════════════════════════════════════════════════
+// 你发「3＝11 有深度」时，"有深度"跟标题没交集 ⇒ 一个词都提不出来 ⇒ 分记了、什么都没学到。
+// 这里改成：把候选**摆到你面前让你选**，选完才动关键词。
+//   【怎么好】固定判据词（进"他对好的定义"的统计，不动关键词）
+//   【加哪个词】从标题里切的候选（选中的进 keywords）
+const ASK_FILE = path.join(DUTY, '待追问.json')
+const TAGS_FILE = path.join(DUTY, '判据词表.json')
+const DEFAULT_TAGS = {
+  怎么好: ['有考据', '讲得清楚', '选题妙', '制作精良'],
+  差在哪: ['标题党', '太水了', '太长了', '广告多'],
+}
+/** 只挂在首尾的虚词，切词时剥掉 */
+const EDGE = /^(的|了|和|与|之|在|是|把|被|就|也|都|第|个|集|期|版|部|共|全)+|(的|了|和|与|之|在|是|共|全)+$/g
+/** 以这些字开头的块多半是半句话（“仅凭一张”“最出圈的”“从原唱到”），不是主题词 */
+const BAD_HEAD = /^[仅最这那一有从在被把让给用对和就也都还很更太真又再才只可该每各另及或与跟同向朝于至并且而乃其此即则年]/
+/** 两字动词/虚词，当关键词毫无意义 */
+const JUNK2 = new Set(['发现', '画出', '看到', '更新', '对比', '实测', '方法', '知道', '开始', '全部', '东西', '时候', '地方'])
+
+/**
+ * 标题 → 候选关键词。没有分词器，用「按字符类别切块 + 剥首尾虚词 + 砍半句话」这套土办法：
+ * 【泰拉瑞亚】32位计算机电路 RISC-V CPU      → 泰拉瑞亚 / 计算机电路 / RISC-V
+ * 儿童漫画家杀死角色？艺术家能摆脱政治立场吗  → 儿童漫画 / 艺术家 …
+ */
+function titleCandidates(title, n = 3) {
+  const s = String(title || '')
+  const runs = s.match(/[\u4e00-\u9fa5]{2,}|[A-Za-z][A-Za-z0-9.\-]{2,}/g) || []
+  const cand = []
+  const push = (raw, mustLen = 2) => {
+    let w = String(raw || '').replace(EDGE, '').trim()
+    let stripped = false
+    // 开头是半句话的虚字（“年的…”“从原唱到…”“最红的…”）⇒ 剥掉再试，而不是整块丢掉
+    for (let i = 0; i < 2 && w && BAD_HEAD.test(w); i++) {
+      w = w.slice(1).replace(EDGE, '').trim()
+      stripped = true
+    }
+    // 4 字头可能正好切在“能/会/要”这类连接词上（“艺术家能”）⇒ 把尾巴削掉
+    w = w.replace(/(能|会|要|可|将|想|去|来|说|做|看|有|没|不|就|再)$/g, '')
+    if (w.length < mustLen) return
+    if (stripped && w.length < 4) return   // 剥过头的残片（“凭一张”“红的居”）不要
+    if (STOP.has(w) || JUNK2.has(w)) return
+    if (BAD_HEAD.test(w)) return
+    // 4K60 / v1.7.0 / K60 这类「字母+数字」的短串是画质/版本标签，不是主题词
+    if (/[A-Za-z]/.test(w) && /\d/.test(w) && w.length <= 6) return
+    cand.push(w)
+  }
+  for (const raw of runs) {
+    const w = raw.replace(EDGE, '')
+    if (!w) continue
+    if (/^[A-Za-z]/.test(w)) { if (w.length >= 3) push(w); continue }
+    if (w.length <= 6) push(w)
+    else {
+      push(w.slice(0, 4))        // 主题一般在开头
+      if (w.length <= 10) push(w) // 整块还能当搜索词就也留着
+    }
+  }
+  // 短词优先：已被更短候选包含的长词一律不要
+  const kept = []
+  for (const w of cand) {
+    if (kept.includes(w)) continue
+    if (kept.some((k) => k.includes(w) || w.includes(k))) continue
+    kept.push(w)
+    if (kept.length >= n) break
+  }
+  return kept
+}
+
+/** 组一个问题（不落盘） */
+function makeQuestion(r, kind) {
+  const tags = (readJson(TAGS_FILE, {}) || {})[kind === 'good' ? '怎么好' : '差在哪'] || DEFAULT_TAGS[kind === 'good' ? '怎么好' : '差在哪']
+  return {
+    at: new Date().toISOString(),
+    bvid: r.bvid, title: r.title, score: r.score, kind, note: r.note,
+    tags, words: titleCandidates(r.title, 3), asked: false, answered: false,
+  }
+}
+
+/** 同时只挂 1 个问题；挂着的没回答（24h 内）就不再叠 */
+function enqueueQuestion(asks, dry) {
+  if (!asks.length) return null
+  const cur = readJson(ASK_FILE, null)
+  if (cur && !cur.answered && !cur.expired && (Date.now() - Date.parse(cur.at || 0)) < 24 * 3600e3) return null
+  const q = asks[0]
+  if (!dry) fs.writeFileSync(ASK_FILE, JSON.stringify(q, null, 2) + '\n', 'utf8')
+  return q
+}
+
 /**
  * 从「他说差在哪」里找出该删的词：现有 keywords 里，出现在理由里的就删。
  * （他说「高数上课太无聊」⇒ 删「高数」；说「标题党」⇒ 没有对应的词，什么都不删）
@@ -517,6 +605,7 @@ async function ingest(dry) {
 
   console.log(`\n=== 解析到 ${rows.length} 条${dry ? '（预览）' : ''} ===`)
   const kwPlan = { add: [], remove: [], notes: [] }
+  const asks = []          // 提不出词的 11/-1 ⇒ 进追问队列（2026-11-05）
   for (const r of rows) {
     const tag = r.score === null ? '文字' : r.score === SUPER ? '★11' : r.score === TERRIBLE ? '✗-1' : `${r.score} 分`
     console.log(`  ${String(tag).padStart(5)}  ${r.bvid}  ${String(r.title).slice(0, 34)}${r.note && r.note !== '私信' ? '  「' + String(r.note).slice(0, 30) + '」' : ''}`)
@@ -524,10 +613,12 @@ async function ingest(dry) {
     if (r.score === SUPER && r.note && r.note !== '私信') {
       const add = extractGoodKeywords(r.note, r.title, '', cur.concat(kwPlan.add).filter((k) => !kwPlan.remove.includes(k)))
       if (add.length) { kwPlan.add.push(...add); kwPlan.notes.push(`11 分加词：${add.join('、')}（来自「${r.note.slice(0, 24)}」）`) }
+      else asks.push(makeQuestion(r, 'good'))
     }
     if (r.score === TERRIBLE && r.note && r.note !== '私信') {
       const bad = extractBadKeywords(r.note, cur.filter((k) => !kwPlan.remove.includes(k)))
       if (bad.length) { kwPlan.remove.push(...bad); kwPlan.notes.push(`-1 分删词：${bad.join('、')}（来自「${r.note.slice(0, 24)}」）`) }
+      else asks.push(makeQuestion(r, 'bad'))
     }
   }
 
@@ -536,6 +627,18 @@ async function ingest(dry) {
     for (const n of kwPlan.notes) console.log('  · ' + n)
   }
   const kwRes = applyKeywordPatch({ add: kwPlan.add, remove: kwPlan.remove, why: '私信评价', dry })
+
+  // 提不出词的那几条 ⇒ 挂一个追问，等你在私信里挑（不静默失败）
+  const q = enqueueQuestion(asks, dry)
+  if (q) {
+    console.log(`\n=== 要追问：${q.kind === 'good' ? '好在哪' : '差在哪'} ===`)
+    console.log(`  《${String(q.title).slice(0, 30)}》${q.score} 分，但提不出关键词`)
+    console.log(`  判据选项：${q.tags.join(' / ')}`)
+    console.log(`  候选词：${q.words.join(' / ') || '（标题里切不出）'}`)
+    T(`待追问 ${q.bvid}`)
+  } else if (asks.length) {
+    console.log(`\n（已经有 1 个追问挂着了，这次不叠加）`)
+  }
   if (kwRes.changed) {
     console.log(`  关键词：${kwRes.before.join(' · ') || '（空）'}  →  ${kwRes.next.join(' · ') || '（空）'}${dry ? '   （预览）' : ''}`)
   }
@@ -583,6 +686,25 @@ const main = async () => {
     return
   }
   if (has('--report')) { writeReport(); return }
+  if (has('--ask-apply')) {
+    // 追问收到的是「一句自由文本」时，用真正的提词逻辑处理一次（幂等）
+    const q = readJson(ASK_FILE, null)
+    const txt = q?.answer?.text
+    if (!q || !txt || q.answer?.applied) { console.log('没有待提炼的自由文本回答。'); return }
+    const cur = (readJson(CFG, {}) || {}).keywords || []
+    const add = q.kind === 'good'
+      ? extractGoodKeywords(txt, q.title, '', cur)
+      : extractBadKeywords(txt, cur)
+    if (add.length) {
+      applyKeywordPatch(q.kind === 'good' ? { add, why: '追问自由文本' } : { remove: add, why: '追问自由文本' })
+      console.log(`从「${txt}」提炼到：${add.join('、')}`)
+    } else {
+      console.log(`「${txt}」里没提炼到可用的词（跟标题没交集）`)
+    }
+    q.answer.applied = true
+    fs.writeFileSync(ASK_FILE, JSON.stringify(q, null, 2) + '\n', 'utf8')
+    return
+  }
   if (has('--learn')) {
     // node 评分.mjs --learn          立刻把缓冲区的纯文字评价学一遍
     // node 评分.mjs --learn --dry    只看会学到什么
@@ -637,6 +759,7 @@ const main = async () => {
 export {
   parseMessage, extractGoodKeywords, extractBadKeywords, applyKeywordPatch, writeReport, loadLedger,
   polarityOf, repeatedPhrases, titlePhrases, learnBuffer,
+  titleCandidates, makeQuestion, enqueueQuestion,
 }
 
 if (import.meta.main) {
