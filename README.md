@@ -116,12 +116,13 @@ Register-ScheduledTask -TaskName 'DSH-BiliDuty' `
 
 ### 对上游的补丁（`patches/`）
 
-上游插件只改**一个文件**，所以不整体 fork，做成可重放的补丁：
+上游插件只改**两个文件**（共 219 行），所以不整体 fork，做成可重放的补丁：
 
 | | |
 |---|---|
 `patches/mcp_server/patched.py` | 我们维护的版本，**改这里就等于改补丁** |
-`patches/mcp_server/mcp_server.patch` | 与上游基线的 unified diff（+202 / −1 行） |
+`patches/mcp_server/mcp_server.patch` | 与上游基线的 unified diff（+211 / −1 行） |
+`patches/index_js/index_js.patch` | 同上（+8 / −2 行）—— 修「日报被砍、额度算少」 |
 `patches/应用补丁.py` | `--check` / 应用 / `--revert`，比 sha256 判断"可应用 / 已应用 / 上游变了" |
 `patches/生成补丁集.py` | 上游升级后重跑，刷新 diff 与指纹 |
 `patches/cordis.patch.yml` | 值班轮最小权限 profile |

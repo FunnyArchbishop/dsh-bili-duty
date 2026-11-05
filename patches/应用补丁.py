@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""应用 / 检查 / 回退本仓库对 dsh-bili-scroll 的补丁。
+"""应用 / 检查 / 回退本仓库对 dsh-bili-scroll 的补丁（支持多个文件）。
 
 为什么不是 `git apply`：
     补丁要打到 `~/.dsh/profiles/<profile>/node_modules/dsh-bili-scroll/` 里，
@@ -10,6 +10,8 @@
         · 目标 == 我们改完的 ⇒ 已应用（幂等跳过）
         · 其它               ⇒ 上游变了 / 被别人改过 ⇒ **拒绝动手**，让你对照 .patch 手工合并
 
+    ⚠️ 改完要**重启 DSH** 才生效（插件是宿主进程加载的，不像 mcp_server.py 每轮重读）。
+
 用法：
     python patches/应用补丁.py --check     只看状态
     python patches/应用补丁.py             应用（幂等，可重复跑）
@@ -18,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import os
 import pathlib
@@ -25,12 +28,13 @@ import shutil
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-PKG = HERE / "mcp_server"
-BASE = PKG / "base-2.3.1.py"
-PATCHED = PKG / "patched.py"
 CORDIS = HERE / "cordis.patch.yml"
 
-REL = pathlib.Path("vendor") / "bilibili-mcp" / "mcp_server.py"
+# (补丁目录名, 插件根目录下的相对路径, 是否还有一份在插件家目录)
+FILES = [
+    ("mcp_server", "vendor/bilibili-mcp/mcp_server.py", True),
+    ("index_js", "index.js", False),
+]
 
 
 def sha(p: pathlib.Path) -> str:
@@ -41,23 +45,21 @@ def dsh_home() -> pathlib.Path:
     return pathlib.Path(os.environ.get("DSH_HOME") or (pathlib.Path.home() / ".dsh"))
 
 
-def plugin_targets(profile: str) -> list[pathlib.Path]:
-    """插件里那份 + 家目录那份（ensureHomeFiles 会在两者不一致时用插件那份覆盖家里的）"""
-    out = []
+def plugin_root(profile: str) -> pathlib.Path | None:
     env = os.environ.get("BILI_PLUGIN_DIR")
     if env:
-        out.append(pathlib.Path(env) / REL)
-    else:
-        base = dsh_home() / "profiles"
-        for d in sorted(base.glob("*/node_modules/dsh-bili-scroll")):
-            # d = <home>/profiles/<profile>/node_modules/dsh-bili-scroll
-            # ⇒ 上一层是 node_modules，再上一层才是 profile 名
-            if profile and d.parent.parent.name != profile:
-                continue
-            out.append(d / REL)
-    duty_home = pathlib.Path(os.environ.get("BILI_DUTY_HOME") or (dsh_home() / "bili-duty"))
-    out.append(duty_home / "mcp_server.py")
-    return out
+        return pathlib.Path(env)
+    base = dsh_home() / "profiles"
+    for d in sorted(base.glob("*/node_modules/dsh-bili-scroll")):
+        # d = <home>/profiles/<profile>/node_modules/dsh-bili-scroll
+        if profile and d.parent.parent.name != profile:
+            continue
+        return d
+    return None
+
+
+def duty_home() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("BILI_DUTY_HOME") or (dsh_home() / "bili-duty"))
 
 
 def state_of(p: pathlib.Path, s_base: str, s_patched: str) -> str:
@@ -78,61 +80,77 @@ def main() -> int:
     ap.add_argument("--profile", default="web", help="补哪个 profile 的插件（默认 web）")
     args = ap.parse_args()
 
-    for f in (BASE, PATCHED):
-        if not f.exists():
-            print(f"缺文件：{f}（先跑 生成补丁集.py）", file=sys.stderr)
-            return 2
-    s_base, s_patched = sha(BASE), sha(PATCHED)
-    print(f"补丁集：基线 {s_base[:12]}…  改后 {s_patched[:12]}…  "
-          f"（+{PATCHED.stat().st_size - BASE.stat().st_size} 字节）\n")
-
-    targets = plugin_targets(args.profile)
+    root = plugin_root(args.profile)
     rc = 0
-    for p in targets:
-        st = state_of(p, s_base, s_patched)
-        tag = {"applied": "✅ 已应用", "ready": "🔧 可应用",
-               "conflict": "⚠️ 上游变了/被改过", "missing": "— 不存在"}[st]
-        print(f"{tag:22} {p}")
+    saw_index = False
 
-        if args.check or st == "missing":
+    for name, rel, also_home in FILES:
+        d = HERE / name
+        patched = next(iter(sorted(d.glob("patched.*"))), None)
+        if patched is None:
+            print(f"缺 {d}/patched.*（先跑 生成补丁集.py）", file=sys.stderr)
+            return 2
+        base = next((p for p in sorted(d.glob("base-*")) if p != patched), None)
+        if base is None:
+            print(f"缺 {d}/base-*（先跑 生成补丁集.py）", file=sys.stderr)
+            return 2
+        s_base, s_patched = sha(base), sha(patched)
+
+        targets: list[pathlib.Path] = []
+        if root is not None:
+            targets.append(root / rel)
+        if also_home:
+            targets.append(duty_home() / rellib_name(rel))
+        if name == "index_js":
+            saw_index = True
+
+        print(f"\n=== {name}（{rel}）基线 {s_base[:12]}… → 改后 {s_patched[:12]}…")
+        if not targets:
+            print("  — 找不到插件目录（用 BILI_PLUGIN_DIR 或 --profile 指过去）")
+
+        for p in targets:
+            st = state_of(p, s_base, s_patched)
+            tag = {"applied": "✅ 已应用", "ready": "🔧 可应用",
+                   "conflict": "⚠️ 上游变了/被改过", "missing": "— 不存在"}[st]
+            print(f"  {tag:22} {p}")
+
+            if args.check or st == "missing":
+                if st == "conflict":
+                    rc = 1
+                continue
+
+            if args.revert:
+                baks = sorted(p.parent.glob(p.name + ".orig-*"))
+                if baks:
+                    shutil.copy2(baks[-1], p)
+                    print(f"    已还原自备份 {baks[-1].name}")
+                else:
+                    shutil.copy2(base, p)
+                    print("    没有备份 ⇒ 直接铺回上游基线")
+                continue
+
+            if st == "applied":
+                continue
             if st == "conflict":
+                print(f"    ⛔ 不动它。请对照 patches/{name}/{name}.patch 手工合并，"
+                      f"或把上游新版本另存为 base-<版本>{base.suffix} 后重跑 生成补丁集.py")
                 rc = 1
-            continue
+                continue
 
-        if args.revert:
-            # 有 .orig 备份就用最新的；没有就直接铺回基线 —— 两者都等于"回到上游原样"
-            baks = sorted(p.parent.glob(p.name + ".orig-*"))
-            if baks:
-                shutil.copy2(baks[-1], p)
-                print(f"    已还原自备份 {baks[-1].name}")
-            else:
-                shutil.copy2(BASE, p)
-                print("    没有备份 ⇒ 直接铺回上游基线")
-            continue
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            bak = p.with_name(p.name + ".orig-" + stamp)
+            shutil.copy2(p, bak)
+            shutil.copy2(patched, p)
+            print(f"    已打补丁（原文件备份为 {bak.name}）")
 
-        if st == "applied":
-            continue
-        if st == "conflict":
-            print("    ⛔ 不动它。请对照 patches/mcp_server/mcp_server.patch 手工合并，"
-                  "或把上游新版本另存为 base-<版本>.py 后重跑 生成补丁集.py")
-            rc = 1
-            continue
-
-        stamp = __import__("datetime").datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = p.with_name(p.name + ".orig-" + stamp)
-        shutil.copy2(p, bak)
-        shutil.copy2(PATCHED, p)
-        print(f"    已打补丁（原文件备份为 {bak.name}）")
-
-    # profile 补丁：只在缺失时放进去（不覆盖你手改过的）。
-    # 仓库里那份写的是占位符 @DUTY_HOME@，铺的时候替换成本机真实路径。
+    # profile 补丁：只在缺失时放进去（不覆盖你手改过的）
     prof = dsh_home() / "profiles" / "bili-duty" / "cordis.patch.yml"
     if CORDIS.exists():
         if not prof.exists():
             if not args.check and not args.revert:
-                duty_home = pathlib.Path(os.environ.get("BILI_DUTY_HOME") or (dsh_home() / "bili-duty"))
+                dh = duty_home()
                 prof.parent.mkdir(parents=True, exist_ok=True)
-                text = CORDIS.read_text(encoding="utf-8").replace("@DUTY_HOME@", duty_home.as_posix())
+                text = CORDIS.read_text(encoding="utf-8").replace("@DUTY_HOME@", dh.as_posix())
                 prof.write_text(text, encoding="utf-8", newline="\n")
                 print(f"\n已写入 profile 补丁：{prof}")
             else:
@@ -140,8 +158,15 @@ def main() -> int:
         else:
             print(f"\nprofile 补丁已存在，没动：{prof}")
 
+    if saw_index:
+        print("\n⚠️ index.js 的改动要**重启 DSH** 才生效（插件是宿主进程加载的）")
     print("\n完成" + ("（有问题，见上面 ⚠️）" if rc else "，一切正常"))
     return rc
+
+
+def rellib_name(rel: str) -> str:
+    """插件包里的相对路径 → 家目录里对应的文件名（只有 mcp_server.py 这一份）"""
+    return pathlib.Path(rel).name
 
 
 if __name__ == "__main__":

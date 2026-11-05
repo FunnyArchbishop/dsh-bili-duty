@@ -1,0 +1,3 @@
+# index.js 的上游基线 / 我们打完后 的指纹
+base    4cc6114d18077c2e94fee59038ec96827234a2d04b069bea9ab21de3ba3ddeb1
+patched 5577fc4a0c5663ead58572a434f020038507d09c3ead23722477d47536c9cce6

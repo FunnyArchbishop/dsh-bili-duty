@@ -1,0 +1,21 @@
+diff --git a/index.js b/index.js
+index 588927a..7653a96 100644
+--- a/index.js
++++ b/index.js
+@@ -1481,8 +1481,14 @@ function reportMeta() {
+         const block = '## 投递\n\n' + roundNotes.map((n) => '- ' + n).join('\n') + '\n'
+         if (!existsSync(f)) { writeFileSync(f, `# 刷B站 · ${dayKey()}\n\n` + block, 'utf8'); return }
+         let cur = readFileSync(f, 'utf8')
+-        const at = cur.indexOf('## 投递')
+-        if (at >= 0) cur = cur.slice(0, at).replace(/\s*$/, '') + '\n'
++        // ⭐⭐ 2026-11-05 修（我们的补丁）：以前是 indexOf('## 投递') —— 找**第一个**投递段，
++        //    然后把它之后的全部内容砍掉 ⇒ 后面每一轮追加的 `### BV` 条目都会被吃掉。
++        //    实测后果：日报每天只留得住**第一轮**（判重表记 20 条、报告只剩 6 个 ###），
++        //    而宿主是按报告里的 ### 行数算"今天挑了几条"的 ⇒ 额度一直算少 ✗
++        //    现在：只看**最后一个**投递段，而且只有当它后面没有别的条目时才替换；
++        //    否则宁可多一段投递记录，也绝不删任何已有内容 ✓
++        const at = cur.lastIndexOf('## 投递')
++        if (at >= 0 && !/^###\s/m.test(cur.slice(at))) cur = cur.slice(0, at)
+         writeFileSync(f, cur.replace(/\s*$/, '') + '\n' + block, 'utf8')
+       } catch { /* 宁可没这段，也不能让这一轮挂掉 */ }
+     }
