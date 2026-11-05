@@ -1,5 +1,5 @@
 // 评分.mjs 的行为自测（不碰真实数据：关键词只做 dry 预览）
-import { parseMessage, extractGoodKeywords, extractBadKeywords, applyKeywordPatch, polarityOf, repeatedPhrases, titlePhrases } from './评分.mjs'
+import { parseMessage, extractGoodKeywords, extractBadKeywords, applyKeywordPatch, polarityOf, repeatedPhrases, titlePhrases, titleCandidates, makeQuestion } from './评分.mjs'
 
 let pass = 0, fail = 0
 const eq = (name, got, want) => {
@@ -65,6 +65,15 @@ const r1 = applyKeywordPatch({ add: ['测试用的新词'], remove: victim ? [vi
 eq('dry 预览能算出增删', { added: r1.added, removed: r1.removed }, { added: ['测试用的新词'], removed: victim ? [victim] : [] })
 eq('dry 预览不改文件（keywords 还是原样）',
   JSON.stringify((JSON.parse(fs.readFileSync(CFG, 'utf8')).keywords || [])), JSON.stringify(cur))
+
+// ── 5. 追问（2026-11-05：光秃秃的 11 分以前根本不触发追问，实测踩到）────
+const q1 = makeQuestion({ bvid: 'BV1x', title: '【东方原曲合集】正作、旧作、官方专辑共793P', score: 11, note: '私信' }, 'good')
+eq('没写理由也能组出追问', q1.tags.length >= 3 && q1.words.length >= 1, true)
+eq('追问带上视频和分数', q1.bvid + '|' + q1.score, 'BV1x|11')
+eq('-1 没理由也会追问', makeQuestion({ bvid: 'BV1y', title: '某个标题', score: -1, note: '私信' }, 'bad').tags[0], '标题党')
+eq('候选词首选是主题不是残片', titleCandidates('【东方原曲合集】正作、旧作、官方专辑共793P', 3)[0], '东方原曲合集')
+eq('候选词不吃画质标签', titleCandidates('【4K60】用10亿token 画出Claude眼中的世界', 3).includes('K60'), false)
+eq('候选词不吃半句（仅凭一张）', titleCandidates('仅凭一张画火爆全网？最出圈的"泡水灵梦"是谁画的？', 3).some((w) => w.startsWith('仅')), false)
 
 console.log(`\n通过 ${pass} · 失败 ${fail}`)
 if (fail) process.exitCode = 1

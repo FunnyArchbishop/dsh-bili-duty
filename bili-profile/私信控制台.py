@@ -964,8 +964,18 @@ async def run(dry: bool, simulate: str | None) -> None:
 
     # 有新消息 ⇒ 顺便跑一次评分（这样纯文字评价也能马上进缓冲区）
     if fresh and SCORING.exists() and not dry:
+        # ⭐ 先算出「哪条消息是用来回答追问的」——告诉 评分.mjs 别把它当评价记账。
+        #    它以**第一条**能解析成回答的消息为准（跟下面循环里的消费顺序一致）。
+        skip_keys: list[str] = []
+        qa_pre = read_ask()
+        if qa_pre and qa_pre.get("asked"):
+            for mm in fresh:
+                if parse_ask_answer(mm["text"], qa_pre):
+                    skip_keys.append(mm["key"])
+                    break
         try:
-            run_proc([os.environ.get("BILI_NODE") or "node", str(SCORING)], timeout=180)
+            run_proc([os.environ.get("BILI_NODE") or "node", str(SCORING)], timeout=180,
+                     env={**os.environ, "BILI_SKIP_MSG_KEYS": ",".join(skip_keys)})
         except Exception as e:
             print("评分脚本跑挂了（忽略）：", e)
 

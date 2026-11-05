@@ -562,8 +562,13 @@ async function ingest(dry) {
 
   const rows = []
   let skipped = 0
+  // ⭐ 控制台会先把「用来回答追问的那条消息」的 key 告诉我们 —— 那些不是评价，别记账。
+  //    以前没有这条：他回追问发个 `3 4`，这边按「文字评价」记了一条 note="4" 的垃圾行 ✗
+  const SKIP_KEYS = new Set(String(process.env.BILI_SKIP_MSG_KEYS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean))
   for (const m of msgs) {
     if (m.fromMe) continue
+    if (SKIP_KEYS.has(m.key)) { console.log(`  （跳过追问回答：${String(m.text).slice(0, 20)}）`); skipped++; continue }
     if (done.has(m.key)) { skipped++; continue }
     const parsed = parseMessage(m.text)
     if (!parsed.length) continue
@@ -610,13 +615,20 @@ async function ingest(dry) {
     const tag = r.score === null ? '文字' : r.score === SUPER ? '★11' : r.score === TERRIBLE ? '✗-1' : `${r.score} 分`
     console.log(`  ${String(tag).padStart(5)}  ${r.bvid}  ${String(r.title).slice(0, 34)}${r.note && r.note !== '私信' ? '  「' + String(r.note).slice(0, 30) + '」' : ''}`)
     const cur = (readJson(CFG, {}) || {}).keywords || []
-    if (r.score === SUPER && r.note && r.note !== '私信') {
-      const add = extractGoodKeywords(r.note, r.title, '', cur.concat(kwPlan.add).filter((k) => !kwPlan.remove.includes(k)))
+    // ⭐ 11 / -1 都要能触发追问 —— **包括没写理由的**。
+    //    以前条件是「有理由且理由不是'私信'」，于是光秃秃的 `6=11` 直接被跳过：
+    //    分记了、词没加、也没问（2026-11-05 使用者实测踩到：'怎么没有回复'）
+    if (r.score === SUPER) {
+      const add = (r.note && r.note !== '私信')
+        ? extractGoodKeywords(r.note, r.title, '', cur.concat(kwPlan.add).filter((k) => !kwPlan.remove.includes(k)))
+        : []
       if (add.length) { kwPlan.add.push(...add); kwPlan.notes.push(`11 分加词：${add.join('、')}（来自「${r.note.slice(0, 24)}」）`) }
       else asks.push(makeQuestion(r, 'good'))
     }
-    if (r.score === TERRIBLE && r.note && r.note !== '私信') {
-      const bad = extractBadKeywords(r.note, cur.filter((k) => !kwPlan.remove.includes(k)))
+    if (r.score === TERRIBLE) {
+      const bad = (r.note && r.note !== '私信')
+        ? extractBadKeywords(r.note, cur.filter((k) => !kwPlan.remove.includes(k)))
+        : []
       if (bad.length) { kwPlan.remove.push(...bad); kwPlan.notes.push(`-1 分删词：${bad.join('、')}（来自「${r.note.slice(0, 24)}」）`) }
       else asks.push(makeQuestion(r, 'bad'))
     }
