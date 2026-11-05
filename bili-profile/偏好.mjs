@@ -27,6 +27,7 @@ const DRY = process.argv.includes('--dry')
 const CFG = path.join(DUTY, 'config.json')
 const PREFS = path.join(DUTY, 'prefs.json')
 const TAGS = path.join(DUTY, '判据统计.json')
+const DEMOTE = path.join(DUTY, '降权.json')
 const CHARTER = path.join(DUTY, 'duty.md')
 const MIRROR = process.argv.includes('--no-mirror') ? null : path.join(HERE, 'duty.md')
 
@@ -52,6 +53,7 @@ function render() {
   const sorted = Object.entries(tags).filter(([, v]) => Number(v) > 0).sort((a, b) => b[1] - a[1])
   const good = sorted.filter(([k]) => !/标题党|太水|太长|广告|听不懂/.test(k))
   const bad = sorted.filter(([k]) => /标题党|太水|太长|广告|听不懂/.test(k))
+  const demote = readJson(DEMOTE, {}) || {}
 
   const out = [BEGIN + ' 由 偏好.mjs 生成，别手改 -->', '# 他已经明说的偏好（2026-11-05 起自动生成）', '']
   out.push('## 硬过滤（宿主侧还会再拦一次，这里是让你少白读）')
@@ -62,6 +64,12 @@ function render() {
   out.push('')
   out.push('## 他给 -1 分时说的「差在哪」')
   out.push(...(bad.length ? bad.map(([k, v]) => `- ${k} × ${v}`) : ['- （还没选过）']))
+  out.push('')
+  out.push('## 降权（还能推，但别排前面 —— 你给过一次 -1，第二次才真删）')
+  const demoted = Object.entries(demote).filter(([, v]) => Number(v?.n || 0) > 0)
+  out.push(...(demoted.length
+    ? demoted.map(([k, v]) => `- ${k}（-1 × ${v.n}${v.bvids?.length ? '，如 ' + v.bvids[v.bvids.length - 1] : ''}）`)
+    : ['- （没有）']))
   out.push('')
   out.push('## 现在的搜索关键词')
   out.push(kws.length ? kws.map((k) => '`' + k + '`').join(' · ') : '-（空）')

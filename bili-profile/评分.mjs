@@ -179,6 +179,7 @@ function extractGoodKeywords(reason, title, up, existing) {
 //   【怎么好】固定判据词（进"他对好的定义"的统计，不动关键词）
 //   【加哪个词】从标题里切的候选（选中的进 keywords）
 const ASK_FILE = path.join(DUTY, '待追问.json')
+const DEMOTE_FILE = path.join(DUTY, '降权.json')
 const TAGS_FILE = path.join(DUTY, '判据词表.json')
 const DEFAULT_TAGS = {
   怎么好: ['有考据', '讲得清楚', '选题妙', '制作精良'],
@@ -257,6 +258,30 @@ function enqueueQuestion(asks, dry) {
   const q = asks[0]
   if (!dry) fs.writeFileSync(ASK_FILE, JSON.stringify(q, null, 2) + '\n', 'utf8')
   return q
+}
+
+/**
+ * -1 分不该一次就把整类内容删掉（2026-11-05 改）：
+ *   以前「理由里出现的关键词」全部当场删 —— 一句"泰拉瑞亚那条太吵"就把 `泰拉瑞亚` 整个品类干掉 ✗
+ *   现在两级：
+ *     第 1 次 → **软降权**（进 降权.json，章程里写成"还能推但排后面"）
+ *     第 2 次 → 才真删（并清掉降权记录）
+ *   想立刻删就用 `/kw del 词`（你说了算）。
+ */
+function demote(words, bvid, dry) {
+  const cur = readJson(DEMOTE_FILE, {}) || {}
+  const soft = []
+  const hard = []
+  for (const w of words) {
+    const rec = cur[w] || { n: 0, bvids: [] }
+    rec.n = Number(rec.n || 0) + 1
+    rec.last = new Date().toISOString().slice(0, 10)
+    rec.bvids = [...(rec.bvids || []), bvid].slice(-5)
+    if (rec.n >= 2) { hard.push(w); delete cur[w] }
+    else { cur[w] = rec; soft.push(w) }
+  }
+  if (!dry) fs.writeFileSync(DEMOTE_FILE, JSON.stringify(cur, null, 2) + '\n', 'utf8')
+  return { soft, hard }
 }
 
 /**
@@ -629,8 +654,18 @@ async function ingest(dry) {
       const bad = (r.note && r.note !== '私信')
         ? extractBadKeywords(r.note, cur.filter((k) => !kwPlan.remove.includes(k)))
         : []
-      if (bad.length) { kwPlan.remove.push(...bad); kwPlan.notes.push(`-1 分删词：${bad.join('、')}（来自「${r.note.slice(0, 24)}」）`) }
-      else asks.push(makeQuestion(r, 'bad'))
+      if (bad.length) {
+        const dm = demote(bad, r.bvid, dry)
+        if (dm.hard.length) {
+          kwPlan.remove.push(...dm.hard)
+          kwPlan.notes.push(`-1 分删词（第 2 次，真删）：${dm.hard.join('、')}`)
+        }
+        if (dm.soft.length) {
+          kwPlan.notes.push(`-1 分降权（第 1 次，先不删）：${dm.soft.join('、')}`)
+        }
+      } else {
+        asks.push(makeQuestion(r, 'bad'))
+      }
     }
   }
 
@@ -771,7 +806,7 @@ const main = async () => {
 export {
   parseMessage, extractGoodKeywords, extractBadKeywords, applyKeywordPatch, writeReport, loadLedger,
   polarityOf, repeatedPhrases, titlePhrases, learnBuffer,
-  titleCandidates, makeQuestion, enqueueQuestion,
+  titleCandidates, makeQuestion, enqueueQuestion, demote,
 }
 
 if (import.meta.main) {
