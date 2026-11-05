@@ -126,8 +126,15 @@ Register-ScheduledTask -TaskName 'DSH-BiliDuty' `
 `patches/生成补丁集.py` | 上游升级后重跑，刷新 diff 与指纹 |
 `patches/cordis.patch.yml` | 值班轮最小权限 profile |
 
-改的两块：`bili_search` 的按播放量搜法说明 + 发私信前的**两道闸**（链接体检 / 投递闸门）。
+改的三块：`bili_search` 的按播放量搜法说明 + 发私信前的**两道闸**（链接体检 / 投递闸门）
++ **召回工具放行**（`bili_rank` / `bili_hot_videos` / `bili_weekly_hot` 不受白名单限制）。
 详见 `patches/README.md`。
+
+> **为什么需要放行榜单工具**：只靠 `order="click"`（全时段播放量排序）会让候选永远落在
+> 历史头部，反复端上同一批、候选池迅速枯竭。B站 的 `bili_rank(category, day=3|7)` 是
+> **官方"近期热度"榜**（内容质量 + 近期数据动态排），正好替代它；配合
+> `bili_weekly_hot` 和 `bili_search(order="pubdate")` 做新片探测，再用
+> **「日均播放 = 播放量 ÷ 发布天数」**排序，就把"太老"和"太新没人看"两个毛病一起治了。
 
 ---
 
