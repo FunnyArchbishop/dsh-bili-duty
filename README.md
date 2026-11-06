@@ -60,7 +60,7 @@
 `patches/` | 对上游两个插件的补丁 + 值班轮的最小权限 profile |
 `README.md` | 本文 |
 
-`dsh-bili-scroll/`、`dsh-video-storyboard/` **不在本仓库**（各自独立；`.gitignore` 里排除，
+`dsh-bili-scroll/`、`dsh-video-storyboard/` **不在本仓库**（各自独立，本仓库不含这两个目录；
 本地可以放一份用于对照补丁）。
 
 ### `bili-profile/` 逐个文件
@@ -107,8 +107,8 @@
 
 | 文件 | 说明 |
 |---|---|
-`local.example.json` | 复制成 `local.json` 填：`ownerUid` / `dutyHome` / `workspace` / `nodeExe` / `dshBin`（真文件 gitignore） |
-`duty-settings.yaml` | 值班轮专属 settings（见 §12）；已入库，因为里面只有路由/模型名，key 走 `apiKeyEnv` 引用 |
+`local.example.json` | 示例配置；复制成 `local.json` 再填实际值（`ownerUid` / `dutyHome` / `workspace` / `nodeExe` / `dshBin`），运行时读的是 `local.json` 这一份 |
+`duty-settings.yaml` | 值班轮专属 settings（见 §12）；只有路由与模型名，认证值用环境变量引用，不写在文件里 |
 `console-launch.example.vbs` | 旧的无窗口启动器样例（新方案见 §7.3） |
 `打分.mjs` | 已退役，只把旧命令转发到 `评分.mjs` |
 
@@ -157,7 +157,7 @@
 
 ### 4.1 最小权限 profile
 
-值班轮是个**没人看守**的 headless 轮。默认 headless profile 只关了 HMR/凭据/授权，
+值班轮是个**没人看守**的 headless 轮。默认 headless profile 只关了 `hmr` / `credentials` / `authorization`，
 工具一个没动 ⇒ 那一轮手里握着整台电脑。`patches/cordis.patch.yml` 的思路不是"叮嘱它别乱来"，
 而是**根本不给它那些手**：
 
@@ -427,7 +427,7 @@ __FEEDBACK__ {"rows":2,"scores":[...],"texts":[...],"asks":1,"added":["可玩性
 |---|---|
 跨进程锁 | 计划任务每分钟一次，碰上上一轮没跑完会**重复回同一条命令**（实测 `/kw` 回了两次）⇒ 拿不到锁就跳过 |
 心跳 | 每轮成功拉一次私信就写 `lastScan` / `scans` —— `/status` 的新鲜度、托盘的存活判断都靠它 |
-失败告警 | 连续失败 **3 次**才私信告警一次（凭据过期/风控），告警过就不再刷屏 |
+失败告警 | 连续失败 **3 次**才私信告警一次（登录过期 / 接口风控），告警过就不再刷屏 |
 崩溃留痕 | pythonw 没有 stderr ⇒ 顶层 `except BaseException` 把 traceback 写进 `console.log` |
 `--simulate` | 真正只读：`SIMULATE` 全局让所有落盘函数空转（有过"预览模式把闸门改真了"的事故） |
 
@@ -581,7 +581,7 @@ vbs 必须写成 **UTF-16 LE + BOM**，否则 wscript 按 ANSI 读 UTF-8 会把�
 | 变量 | 作用 |
 |---|---|
 `BILI_DUTY_HOME` / `BILI_SCORING_HOME` | 运行时目录（默认 `~/.dsh/bili-duty`） |
-`BILI_OWNER_UID` | 你的大号 uid（私信发给谁） |
+`BILI_OWNER_UID` | 接收私信的账号 uid（填在 `local.json`） |
 `BILI_NODE` / `BILI_DSH_BIN` | node 与 dsh 的路径（找不到就走 `local.json`） |
 `BILI_SKIP_MSG_KEYS` | 控制台 → 评分 的交接：这些消息不是评价 |
 `BILI_MCP_TOOLS` | 插件 → MCP 的工具白名单（见 §4.2） |
@@ -614,8 +614,8 @@ vbs 必须写成 **UTF-16 LE + BOM**，否则 wscript 按 ANSI 读 UTF-8 会把�
 dsh plugin --profile web add dsh-bili-scroll
 dsh plugin --profile web add dsh-video-storyboard
 python patches/应用补丁.py          # 打补丁 + 生成 profile 补丁 + 生成无窗口启动器
-# 扫码登录 B站 小号，凭证落在 ~/.dsh/bili-duty/bili_credential.json
-cp bili-profile/local.example.json bili-profile/local.json   # 填 uid 和路径
+# 扫码登录 B站 账号（插件会把登录信息存到 ~/.dsh/bili-duty/bili_credential.json）
+cp bili-profile/local.example.json bili-profile/local.json   # 填账号 uid 和本机路径
 
 node   bili-profile/评分.mjs --list
 node   bili-profile/对账补记.mjs
@@ -664,7 +664,7 @@ python bili-profile/测控制台.py && python bili-profile/测追问.py && pytho
 3 | **uv 建的 venv 里 `pythonw.exe` 不是无窗口版**（PE `subsystem=3`，跟 `python.exe` 同一份复制） | `wscript` + `WshShell.Run(cmd, 0, …)`；注意 pythonw 下 `sys.stdout` 是 `None`，`print()` 会崩 |
 4 | **全角 `＝` 让 11 分凭空消失**：`3＝11 有深度` 被当成闲聊 | 宽度映射（`−0xFEE0`）做归一化；**不能**用 NFKC（会把 `，` 改成 `,`） |
 5 | **日报被回滚**：某轮挑的整批没进报告 | 补丁修 `lastIndexOf`，同时用对账补记每分钟兜底 |
-6 | **`.gitignore` 行尾的 `#` 不是注释**：`local.json  # 说明` 会变成一条永远匹配不上的规则 | 规则独占一行（差点把 uid 和画像提交上去） |
+6 | **`.gitignore` 行尾的 `#` 不是注释**：`local.json  # 说明` 会变成一条永远匹配不上的规则 | 规则独占一行（差点把本地数据文件一起提交） |
 7 | **1 分钟扫描要跨进程互斥** | `O_EXCL` 锁文件；判"值班轮在不在跑"只看 `run-lock.json` 的 `pid`，不能看文件新旧 |
 8 | **`--simulate` 曾经写真实配置**（预览里改了闸门上限） | `SIMULATE` 全局让所有落盘空转，测试专门盯这条 |
 9 | **指令被当成评价吞掉**：`加词：可玩性强` 静默记账 | 关键词指令的判断**排在评价之前** |
