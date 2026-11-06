@@ -326,6 +326,89 @@ def handle_kw_command(text: str, dry: bool) -> str:
     return head + f"\n现在（{len(after)}）：{' · '.join(after)}" + "\n（下一轮挑片就用新的）"
 
 
+# ── 文字评价的「检查 → 反馈」链（2026-11-06）────────────────────────────
+# 起因：文字评价以前静默落进缓冲区 —— 使用者连着问"为什么没有回复"。
+# 现在评分脚本会给机器行，这里翻成人话回执；再加个 /查 让人预检。
+
+def parse_feedback(out: str):
+    """从 评分.mjs 的 stdout 里抠出 __FEEDBACK__ 那行"""
+    for line in (out or "").splitlines():
+        if line.startswith("__FEEDBACK__ "):
+            try:
+                return json.loads(line[len("__FEEDBACK__ "):])
+            except Exception:
+                return None
+    return None
+
+
+def format_feedback(fb: dict) -> str:
+    """把评分结果翻成一句人话（空字符串 = 不用回执）"""
+    if not fb:
+        return ""
+    parts = []
+    scores = fb.get("scores") or []
+    texts = fb.get("texts") or []
+    if scores:
+        bits = []
+        for s in scores[:8]:
+            v = s.get("score")
+            bits.append("★11" if v == 11 else ("✗-1" if v == -1 else f"{v}分"))
+        parts.append(f"记下 {len(scores)} 条打分：" + " · ".join(bits))
+    if texts:
+        n = len(texts)
+        sample = str(texts[0].get("note") or "")[:16]
+        parts.append(f"记下 {n} 条文字评价（「{sample}」…）→ 进缓冲区")
+    if fb.get("added"):
+        parts.append("关键词 +" + "、".join(fb["added"]))
+    if fb.get("removed"):
+        parts.append("关键词 -" + "、".join(fb["removed"]))
+    if fb.get("asks"):
+        parts.append(f"{fb['asks']} 条提不出词，等会儿追问你")
+    return "；".join(parts)
+
+
+def cmd_check(args: list[str]) -> str:
+    """预检：这句话我会怎么理解？**只看不动**（不记账、不改配置）"""
+    text = " ".join(args).strip()
+    if not text:
+        return ("用法：/查 4 加词：可玩性强　或　/查 4 讲得真清楚\n"
+                "（只告诉我会怎么理解，什么都不改）")
+    out = [f"【预检】{text}", ""]
+    acted = False
+
+    kwc = parse_kw_command(text)
+    if kwc:
+        op, words = kwc
+        out.append(f"→ 关键词指令：{'加' if op == 'add' else '删'}「{'、'.join(words)}」"
+                   "（真发的话会立刻执行并回执）")
+        acted = True
+
+    q = read_ask()
+    ans = parse_ask_answer(text, q) if q else None
+    if ans:
+        kind, val = ans
+        if not q:
+            out.append("→ 看着像「回答追问」，但现在没有挂起的问题 ⇒ 会按评价处理")
+        elif kind == "nums":
+            out.append(f"→ 回答追问：编号 {val}")
+        else:
+            out.append("→ 回答追问：自由文本（我会再提炼一次词）")
+        acted = True
+
+    flat = to_half(text)
+    if not acted:
+        if REVIEW_PAIR.search(flat):
+            out.append("→ 算「打分」：交给评分脚本记账，我会回一条回执")
+        elif REVIEW_TEXT.match(flat):
+            out.append("→ 算「文字评价」：记给对应条目、进缓冲区，我会回一条回执")
+            out.append("  想顺手加词就说「加词：X」（比写长句有用）")
+        else:
+            out.append("→ 不算命令、也不是评价 ⇒ 会当成聊天，起一轮来回答你")
+
+    out += ["", "（以上只是预检，什么都没改）"]
+    return "\n".join(out)
+
+
 def to_half(s: str) -> str:
     """全角 → 半角，**等长映射**（中文标点保持不变）。
     ⚠️ 不能用 unicodedata.normalize('NFKC')：它会把中文逗号 `，` 改成 `,`，
@@ -458,6 +541,7 @@ def cmds():
         "buf": cmd_buf, "learn": cmd_learn, "last": cmd_last,
         "status": cmd_status, "cost": cmd_cost, "help": cmd_help,
         "mute": cmd_mute, "unmute": cmd_unmute, "ban": cmd_ban, "gate": cmd_gate,
+        "查": cmd_check, "check": cmd_check,
     }
 
 
@@ -572,7 +656,9 @@ def cmd_help(_args) -> str:
         "/debug 总览 ｜ /status 额度与窗口\n"
         "/last 今天挑了哪些 ｜ /list 最近台账\n"
         "/buf 缓冲区 ｜ /cost 今天花多少\n"
-        "/答 1 3 回答追问（也可以直接说一句）"
+        "/答 1 3 回答追问（也可以直接说一句）\n"
+        "\n【随时】/查 <一句话> 预检我会怎么理解（不记账、不改配置）\n"
+        "私信里直接说「加词：X」「删词：X」也行，我立刻回执"
     )
 
 
@@ -988,7 +1074,7 @@ def chunk(text: str) -> list[str]:
 
 
 # ── 命令解析 ──────────────────────────────────────────────────────────────
-CMD_RE = re.compile(r"^\s*[/／#]\s*([a-zA-Z]+)\s*(.*)$", re.S)
+CMD_RE = re.compile(r"^\s*[/／#]\s*([a-zA-Z\u4e00-\u9fa5]+)\s*(.*)$", re.S)
 
 
 def parse_command(text: str):
@@ -1072,8 +1158,18 @@ async def run(dry: bool, simulate: str | None) -> None:
                     skip_keys.append(mm["key"])
                     break
         try:
-            run_proc([os.environ.get("BILI_NODE") or "node", str(SCORING)], timeout=180,
-                     env={**os.environ, "BILI_SKIP_MSG_KEYS": ",".join(skip_keys)})
+            r = run_proc([os.environ.get("BILI_NODE") or "node", str(SCORING)], timeout=180,
+                         env={**os.environ, "BILI_SKIP_MSG_KEYS": ",".join(skip_keys)})
+            # ⭐ 文字评价/打分不再静默：让评分脚本的结果回给使用者
+            fb_msg = format_feedback(parse_feedback(r.stdout or ""))
+            if fb_msg:
+                for part in chunk(fb_msg):
+                    if dry:
+                        print("---- 回执预览 ----\n" + part)
+                    else:
+                        await send_dm(part)
+                        await asyncio.sleep(1.0)
+                append_log("回执：" + fb_msg[:80])
         except Exception as e:
             print("评分脚本跑挂了（忽略）：", e)
 

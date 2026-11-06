@@ -1,5 +1,6 @@
 """私信控制台 自测：只看纯函数，不碰网络、不发私信。"""
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -65,6 +66,35 @@ eq("打分不能被当成指令", m.parse_kw_command("4＝11"), None)
 eq("普通评价不是指令", m.parse_kw_command("4 调色板真舒服"), None)
 eq("闲聊不是指令", m.parse_kw_command("今天有什么好看的"), None)
 eq("单字词被丢掉", m.parse_kw_command("加词：好"), None)
+
+# ── 6. 文字评价的「检查→反馈」链（2026-11-06）──────────────────────────
+STDOUT = """已记账 3 条到 ratings.jsonl
+__FEEDBACK__ {"rows":3,"scores":[{"bvid":"BV1a","score":11,"note":"私信"},{"bvid":"BV1b","score":10,"note":"私信"}],"texts":[{"bvid":"BV1c","note":"可玩性强"}],"asks":1,"added":["可玩性强"],"removed":[]}
+"""
+fb = m.parse_feedback(STDOUT)
+eq("能抠出机器行", (fb or {}).get("rows"), 3)
+eq("没有机器行时返回 None", m.parse_feedback("只有人话"), None)
+msg = m.format_feedback(fb)
+print("   回执长这样：", msg)
+eq("回执提到打分条数", "记下 2 条打分" in msg, True)
+eq("回执提到文字评价", "文字评价" in msg, True)
+eq("回执提到加词", "关键词 +可玩性强" in msg, True)
+eq("回执提到要追问", "追问你" in msg, True)
+eq("空 payload 不回执", m.format_feedback({}), "")
+
+print("\n=== 7. /查 预检只看不动 ===")
+before_cfg = json.loads(pathlib.Path(m.CFG).read_text(encoding="utf-8"))
+r1 = m.cmd_check(["4", "加词：可玩性强"])
+eq("预检认出加词指令", "关键词指令" in r1, True)
+eq("预检标明什么都没改", "什么都没改" in r1, True)
+r2 = m.cmd_check(["4", "讲得真清楚"])
+eq("预检认出文字评价", "文字评价" in r2, True)
+r3 = m.cmd_check(["1=10", "3=9"])
+eq("预检认岀打分", "打分" in r3, True)
+r4 = m.cmd_check(["今天有什么好看的"])
+eq("预检认出闲聊", "聊天" in r4, True)
+eq("预检确实没改配置",
+   json.loads(pathlib.Path(m.CFG).read_text(encoding="utf-8")), before_cfg)
 
 print(f"\n通过 {ok} · 失败 {fail}")
 if fail:

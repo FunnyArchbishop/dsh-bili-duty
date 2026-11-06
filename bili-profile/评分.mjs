@@ -695,6 +695,16 @@ async function ingest(dry) {
   fs.appendFileSync(LEDGER, rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
   writeJson(STATE, { processed: [...done], lastRun: new Date().toISOString() })
   console.log(`\n已记账 ${rows.length} 条到 ratings.jsonl`)
+  // ⭐ 2026-11-06：给控制台吐一条**机器可读**的反馈，它据此回执给使用者。
+  //   起因：文字评价以前静默落进缓冲区，一个字都不回 —— 使用者连着问"为什么没有回复"。
+  console.log('__FEEDBACK__ ' + JSON.stringify({
+    rows: rows.length,
+    scores: rows.filter((r) => r.score !== null).map((r) => ({ bvid: r.bvid, score: r.score, note: r.note })),
+    texts: rows.filter((r) => r.score === null).map((r) => ({ bvid: r.bvid, note: r.note })),
+    asks: asks.length,
+    added: kwRes.added || [],
+    removed: kwRes.removed || [],
+  }))
   T(`记账 ${rows.length} 条` + (kwRes.changed ? `｜关键词 ${kwRes.before.join('/')}→${kwRes.next.join('/')}` : ''))
 
   // ⭐ 纯文字评价：先缓冲，攒够了再学（学完才动关键词 + 写进画像）
