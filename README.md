@@ -139,13 +139,6 @@ Register-ScheduledTask -TaskName 'DSH-BiliDuty' `
 
 ---
 
-## 隐私
-
-仓库里**只有代码和文档**。个人画像、B站 uid、收藏夹抓取、私信记录、日报、本机路径一律 `.gitignore`；
-脚本按 **环境变量 > `local.json` > 默认值** 取值，换机器只填一个 `local.json`。
-
-B站 凭证（`bili_credential.json` 里的 SESSDATA）**等同于你的登录态**，任何情况下都不要提交。
-
 ## License
 
 MIT。上游两个插件的版权归各自作者。
