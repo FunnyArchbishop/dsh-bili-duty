@@ -266,6 +266,65 @@ def format_ask(q: dict) -> str:
 
 ASK_NUMS = re.compile(r"^[\d\s,，、+＋]+$")
 
+# ⭐⭐ 2026-11-06：私信里也能直接下「加词 / 删词」指令。
+#   起因：使用者发「4 · 加词：可玩性强」想给第 4 条加个搜索词，
+#   结果被 looks_like_review 当成"文字评价"静默记账 ——
+#   词没加、追问没关、一个字都没回 ✗
+#   指令优先级最高：**指令 > 追问回答 > 打分 > 闲聊**。
+KW_CMD = re.compile(
+    r"(加词|加个词|加关键词|添加关键词|删词|删掉词|去掉词|删关键词|删掉关键词)"
+    r"\s*(?:[：:]\s*|\s+)(.+)$"
+)
+# 指令前面常带一个条目号（`4 ·` / `4、` / `[4]`），只是指代哪条视频，剥掉
+ITEM_PREFIX = re.compile(r"^\s*\[?\d{1,2}\]?\s*[·．.、,，:：\-\s]*")
+
+
+def parse_kw_command(text: str):
+    """返回 ('add'|'del', ['词', …]) 或 None"""
+    raw = (text or "").strip()
+    if not raw or len(raw) > 60:
+        return None
+    t = ITEM_PREFIX.sub("", to_half(raw)).strip()
+    m = KW_CMD.search(t)
+    if not m:
+        return None
+    op = "del" if m.group(1).startswith(("删", "去掉")) else "add"
+    words = [w.strip() for w in re.split(r"[,，、;；/|\s]+", m.group(2)) if w.strip()]
+    words = [w for w in words if 1 < len(w) <= 12]
+    return (op, words) if words else None
+
+
+def handle_kw_command(text: str, dry: bool) -> str:
+    """执行加词/删词指令，顺手把挂着的追问关掉（这就是它在回答"加哪个词"）"""
+    op, words = parse_kw_command(text)
+    before, after, changed = patch_keywords(
+        add=(words if op == "add" else ()), remove=(words if op == "del" else ()))
+    if op == "add":
+        hit = [w for w in words if w in after and w not in before]
+    else:
+        hit = [w for w in words if w in before and w not in after]
+
+    q = read_ask()
+    if q:
+        q["answered"] = True
+        q["answer"] = {"tags": [], "words": hit if op == "add" else [],
+                       "text": str(text)[:60], "at": now_bj().isoformat(timespec="seconds")}
+        if not dry:
+            write_ask(q)
+
+    if not dry:
+        try:
+            run_proc([NODE, str(PREF)], timeout=60)      # 立刻渲染进章程
+        except Exception:
+            pass
+        append_log(f"关键词指令 {op} {words} → {after}")
+
+    if not hit:
+        tail = "已经在关键词里了" if op == "add" else "本来就不在关键词里"
+        return f"{'、'.join(words)} {tail}\n现在（{len(after)}）：{' · '.join(after)}"
+    head = f"关键词 +{'、'.join(hit)}" if op == "add" else f"关键词 -{'、'.join(hit)}"
+    return head + f"\n现在（{len(after)}）：{' · '.join(after)}" + "\n（下一轮挑片就用新的）"
+
 
 def to_half(s: str) -> str:
     """全角 → 半角，**等长映射**（中文标点保持不变）。
@@ -1037,7 +1096,21 @@ async def run(dry: bool, simulate: str | None) -> None:
             print(f"[追问] {q0.get('bvid')} 已发出")
 
     for m in fresh:
-        # ⭐ 先看是不是在回答追问（裸数字只在「已经问出去」时才当答案）
+        # ⭐⭐ 指令优先级最高：加词 / 删词（2026-11-06 加 —— 以前这类消息会掉进
+        #   "文字评价"被静默记账：词没加、追问没关、一个字都不回）
+        if parse_kw_command(m["text"]):
+            reply = handle_kw_command(m["text"], dry)
+            print(f"[{m['ts']}] 关键词指令 → {reply.replace(chr(10), ' ')[:40]}")
+            for p in chunk(reply):
+                if dry:
+                    print("---- 预览 ----\n" + p)
+                else:
+                    await send_dm(p)
+                    await asyncio.sleep(1.0)
+            handled.add(m["key"])
+            continue
+
+        # ⭐ 再看是不是在回答追问（裸数字只在「已经问出去」时才当答案）
         qa = read_ask()
         explicit = m["text"].lstrip().startswith(("/答", "/answer"))
         if explicit and not qa:

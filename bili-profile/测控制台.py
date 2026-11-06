@@ -53,6 +53,19 @@ eq("全角斜杠也认", m.parse_command("／debug"), ("debug", []))
 eq("不认识的命令", m.parse_command("/wat")[0], "ERR")
 eq("不是命令", m.parse_command("1=10"), None)
 
+# ── 5. 私信里的「加词/删词」指令（2026-11-06：以前会被当成文字评价静默吞掉）──
+eq("带条目号 + 全角冒号", m.parse_kw_command("4 · 加词：可玩性强"), ("add", ["可玩性强"]))
+eq("不带条目号", m.parse_kw_command("加词：可玩性强"), ("add", ["可玩性强"]))
+eq("空格分隔", m.parse_kw_command("4 加词 可玩性强"), ("add", ["可玩性强"]))
+eq("全角空格", m.parse_kw_command("加词　可玩性强"), ("add", ["可玩性强"]))
+eq("多个词", m.parse_kw_command("加关键词:东方 音乐"), ("add", ["东方", "音乐"]))
+eq("删词", m.parse_kw_command("3、删词：高数"), ("del", ["高数"]))
+eq("删掉也认", m.parse_kw_command("删掉关键词：高数"), ("del", ["高数"]))
+eq("打分不能被当成指令", m.parse_kw_command("4＝11"), None)
+eq("普通评价不是指令", m.parse_kw_command("4 调色板真舒服"), None)
+eq("闲聊不是指令", m.parse_kw_command("今天有什么好看的"), None)
+eq("单字词被丢掉", m.parse_kw_command("加词：好"), None)
+
 print(f"\n通过 {ok} · 失败 {fail}")
 if fail:
     sys.exit(1)
