@@ -96,4 +96,49 @@ else:
     print("   ✓ UTF-16 LE / 路径正确 / window style 0")
     print("   ", [ln for ln in text.splitlines() if ln.startswith("sh.Run")][0][:110])
 
+print("\n=== ⑦ 图标（抠掉白底的插画）===")
+png, ico = SRC.parent / "图标.png", SRC.parent / "图标.ico"
+assert callable(getattr(m, "load_icon", None)), "缺 load_icon()"
+assert callable(getattr(m, "apply_window_icon", None)), "缺 apply_window_icon()"
+if png.exists():
+    from PIL import Image
+
+    im = Image.open(png)
+    print(f"   {png.name}: {im.size} {im.mode} {png.stat().st_size / 1024:.0f} KB")
+    assert im.mode == "RGBA", "图标必须是 RGBA（要有透明底）"
+    assert im.size == (512, 512)
+
+    # ① 四角必须透明 —— 这就是"去掉白边背景"
+    al = im.getchannel("A")
+    w, h = im.size
+    corners = [al.getpixel((0, 0)), al.getpixel((w - 1, 0)), al.getpixel((0, h - 1)), al.getpixel((w - 1, h - 1))]
+    print("   四角 alpha:", corners)
+    assert max(corners) == 0, "四角不透明 ⇒ 白边没去掉"
+
+    # ② 中心必须不透明（图案还在）
+    print("   中心 alpha:", al.getpixel((w // 2, h // 2)))
+    assert al.getpixel((w // 2, h // 2)) == 255
+
+    # ③ 边缘要有半透明过渡（抗锯齿），不能是硬切
+    semi = sum(1 for a in al.get_flattened_data() if 0 < a < 255)
+    print(f"   半透明过渡像素: {semi}")
+    assert semi > 100, "边缘没有抗锯齿"
+
+    # ④ 托盘/窗口图标走的就是这张图，而不是画出来的备用图
+    ic = m.load_icon(64)
+    print("   load_icon(64) ->", ic.size, ic.mode)
+    assert ic.size == (64, 64) and ic.mode == "RGBA"
+    ref = im.resize((64, 64), Image.LANCZOS)
+    same = list(ic.get_flattened_data()) == list(ref.get_flattened_data())
+    print("   与 图标.png 缩放到 64 完全一致:", same)
+    assert same, "托盘图标没走 图标.png"
+
+if ico.exists():
+    from PIL import Image
+
+    ic2 = Image.open(ico)
+    got = sorted(ic2.info.get("sizes", []))
+    print(f"   {ico.name}: {ico.stat().st_size / 1024:.0f} KB，内含 {len(got)} 个尺寸 {got}")
+    assert (16, 16) in got and (256, 256) in got, "ICO 缺小尺寸或 256 大图标"
+
 print("\n✓ 宿主启动逻辑就绪（spawn 分支等下次开机实测）")

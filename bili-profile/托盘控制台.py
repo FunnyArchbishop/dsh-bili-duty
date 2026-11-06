@@ -317,6 +317,7 @@ class App:
         root.title("刷B站 · 控制台")
         root.geometry("720x660")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        apply_window_icon(root)
 
         self.build()
         # 一启动就把宿主拉起来（否则值班轮不会跑）；--no-host 可以跳过
@@ -632,22 +633,58 @@ class App:
             pass
 
 
+# ── 图标 ─────────────────────────────────────────────────────────────────
+ICON_PNG = HERE / "图标.png"
+ICON_ICO = HERE / "图标.ico"
+
+
+def load_icon(size: int = 64):
+    """图标：优先用 图标.png（抠掉白底的插画），没有就退回画一个。
+
+    返回 (PIL.Image, tk.PhotoImage|None)。PhotoImage 只给 tkinter 用，
+    必须挂在长生命周期对象上，否则会被 GC 掉、窗口图标变空白。
+    """
+    from PIL import Image
+
+    if ICON_PNG.exists():
+        try:
+            img = Image.open(ICON_PNG).convert("RGBA")
+            return img.resize((size, size), Image.LANCZOS)
+        except Exception as e:
+            core.append_log(f"读图标失败（用备用图标）：{e}")
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    k = size / 64
+    d.ellipse((6 * k, 6 * k, 58 * k, 58 * k), fill=(0, 161, 214, 255))
+    d.rectangle((26 * k, 18 * k, 38 * k, 46 * k), fill=(255, 255, 255, 255))
+    d.rectangle((26 * k, 18 * k, 44 * k, 24 * k), fill=(255, 255, 255, 255))
+    d.rectangle((26 * k, 29 * k, 44 * k, 35 * k), fill=(255, 255, 255, 255))
+    d.rectangle((26 * k, 40 * k, 44 * k, 46 * k), fill=(255, 255, 255, 255))
+    return img
+
+
+def apply_window_icon(root) -> None:
+    """任务栏 / 标题栏图标。tkinter 只认 PhotoImage(GIF/PNG/PPM)。"""
+    try:
+        import tkinter as tk
+        if ICON_PNG.exists():
+            photo = tk.PhotoImage(file=str(ICON_PNG))
+            root.iconphoto(True, photo)
+            root._bili_icon_photo = photo        # 留住引用，否则图标会变空白
+    except Exception as e:
+        core.append_log(f"窗口图标没设上：{e}")
+
+
 # ── 托盘 ─────────────────────────────────────────────────────────────────
 def start_tray(app: App):
     try:
         import pystray
-        from PIL import Image, ImageDraw
     except Exception as e:
         print("托盘库没装好（pip install pystray pillow）：", e)
         return None
 
-    img = Image.new("RGB", (64, 64), (0, 161, 214))
-    d = ImageDraw.Draw(img)
-    d.ellipse((6, 6, 58, 58), fill=(255, 255, 255))
-    d.rectangle((26, 18, 38, 46), fill=(0, 161, 214))       # 一个「B」的简化竖条
-    d.rectangle((26, 18, 44, 24), fill=(0, 161, 214))
-    d.rectangle((26, 29, 44, 35), fill=(0, 161, 214))
-    d.rectangle((26, 40, 44, 46), fill=(0, 161, 214))
+    img = load_icon(64)
 
     menu = pystray.Menu(
         pystray.MenuItem("显示窗口", lambda: app.q.put("show"), default=True),
