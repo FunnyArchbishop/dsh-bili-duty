@@ -40,3 +40,4 @@ node_modules/
 .venv/
 uv-python/
 __pycache__/
+bili-profile/启动控制台.vbs

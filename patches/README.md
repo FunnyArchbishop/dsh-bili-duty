@@ -73,6 +73,16 @@ python patches/应用补丁.py --revert   # 用 .orig-* 备份还原
 插件启动时 `ensureHomeFiles` 会拿包里那份覆盖家目录，只有两份字节相同才会跳过。
 `index.js` 只有插件包那一份。
 
+### 顺手生成的「无黑框启动器」
+
+跑应用脚本时还会用 `launcher/启动控制台.vbs.tpl` 生成 `bili-profile/启动控制台.vbs`
+（桌面快捷方式指 `wscript.exe "…\启动控制台.vbs"`）。
+
+为什么必须绕这一道：**这个 uv 造的 venv 里 `python.exe` 和 `pythonw.exe` 是同一份复制**
+（都是 `subsystem=3` console，各 45568 字节），所以"换成 pythonw"根本不解决问题 —— 实测过。
+只有 `WshShell.Run(cmd, 0, …)`（window style 0）才真不给窗口。模板生成时写成
+**UTF-16 LE + BOM**，否则 `wscript` 按 ANSI 读 UTF-8 会把中文路径读坏。
+
 ## 状态判断
 
 应用脚本不比 patch 上下文，而是比 **sha256**：

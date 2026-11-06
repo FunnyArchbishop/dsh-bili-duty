@@ -36,6 +36,92 @@ POLL_SECONDS = 15
 API = "http://127.0.0.1:3080/api/bili-duty"
 
 
+def _ideal_interpreter():
+    """该用哪个解释器跑这个界面。
+
+    首选是**插件配置里那个 venv 的 pythonw**（aiohttp / pystray / Pillow 都装在那儿，
+    config.json 的 pythonPath 就是它）；退路才是跟当前解释器同目录的 pythonw.exe。
+    只换成同目录的 pythonw 是不够的：系统 Python 里没有 aiohttp，
+    轮询会一直报「No module named 'aiohttp'」。
+    """
+    cands = []
+    try:
+        p = (core.read_json(core.CFG, {}) or {}).get("pythonPath") or ""
+        if p:
+            cands.append(pathlib.Path(p).with_name("pythonw.exe"))
+    except Exception:
+        pass
+    exe = pathlib.Path(sys.executable)
+    if exe.name.lower().startswith("python"):
+        cands.append(exe.with_name("pythonw.exe"))
+    for c in cands:
+        try:
+            if c.exists():
+                return c
+        except Exception:
+            pass
+    return None
+
+
+def hide_own_console() -> None:
+    """如果自己带着一个黑框控制台，就地把它藏掉。
+
+    为什么要这层：venv 的 pythonw.exe 是 console 子系统（跟 python.exe 同一份复制），
+    走 vbs 启动才没有窗口；但万一使用者双击 .py 或从终端 python 起，黑框就出来了。
+    ⚠️ 安全线：GetConsoleProcessList 里只有自己才藏 —— 要是还挂着 cmd/pwsh，
+    那说明这是使用者的终端，藏了等于把他的窗口吞掉。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        hwnd = k32.GetConsoleWindow()
+        if not hwnd:
+            return                                  # 本来就没有控制台，最理想
+        arr = (ctypes.c_uint * 16)()
+        n = k32.GetConsoleProcessList(arr, 16)
+        if n != 1:
+            return                                  # 还有别人挂着 ⇒ 不是我们的窗口
+        ctypes.windll.user32.ShowWindow(hwnd, 0)    # SW_HIDE
+    except Exception:
+        pass
+
+
+def relaunch_without_console() -> None:
+    """跑在带控制台 / 不对的解释器下，就换成正确的 pythonw 重开自己，然后退出。
+
+    为什么：双击 .py（或用终端 `python 托盘控制台.py`）会带一个黑框控制台窗口，
+    而这是个常驻的托盘程序，那个窗口只会碍事（截图里那个写着「[追问] … 已发出」的就是）。
+    ⚠️ 不用 ShowWindow 藏自己的控制台 —— 那会把使用者自己开着的终端一起藏掉。
+    ⚠️ --selftest 要 stdout，不能重开。
+    """
+    if os.name != "nt" or "--selftest" in sys.argv:
+        return
+    pyw = _ideal_interpreter()
+    if pyw is None:
+        return
+    try:
+        if pathlib.Path(sys.executable).resolve() == pyw.resolve():
+            return                            # 已经是它了，别再套娃
+    except Exception:
+        pass
+    flags = 0x08000000                       # CREATE_NO_WINDOW，只给这个
+    #  不用 DETACHED_PROCESS：对 console 子系统的程序它不保证没有窗口；
+    #  CREATE_NO_WINDOW 才是「console 程序，但别开窗口」的准确说法。
+    argv = list(sys.argv)
+    try:                                     # 用绝对路径，别指望新进程的 cwd 一样
+        argv[0] = str(pathlib.Path(argv[0]).resolve())
+    except Exception:
+        argv[0] = str(HERE / "托盘控制台.py")
+    try:
+        subprocess.Popen([str(pyw), *argv], cwd=str(HERE),
+                         close_fds=True, creationflags=flags)
+    except Exception:
+        return                                # 换不起来就照常跑，别把程序搞死
+    raise SystemExit(0)
+
+
 def load_core():
     """复用 私信控制台.py 的全部逻辑（不重复造一遍读写/改配置的代码）"""
     spec = importlib.util.spec_from_file_location("bili_core", HERE / "私信控制台.py")
@@ -58,6 +144,65 @@ def host_up() -> bool:
             return True
     except Exception:
         return False
+
+
+# ── 单实例 ───────────────────────────────────────────────────────────────
+PID_FILE = core.DUTY / "tray.pid"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Windows 判活用 OpenProcess + GetExitCodeProcess。
+    ⚠️ 不用 os.kill(pid, 0)：Windows 上它等价于 TerminateProcess，会把进程杀掉。"""
+    if os.name != "nt" or pid <= 0:
+        return False
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return code.value == 259                 # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return False
+
+
+def another_instance() -> bool:
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    return pid != os.getpid() and _pid_alive(pid)
+
+
+def mark_instance() -> None:
+    try:
+        PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def unmark_instance() -> None:
+    try:
+        if PID_FILE.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            PID_FILE.unlink()
+    except Exception:
+        pass
+
+
+def open_terminal() -> None:
+    """在项目目录里开一个新的 cmd 窗口（零拼装：cwd 直接给，cmd /k 保持不关）"""
+    try:
+        subprocess.Popen(["cmd", "/k"], cwd=str(HERE),
+                         creationflags=0x00000010)   # CREATE_NEW_CONSOLE
+        core.append_log("托盘：打开命令行窗口")
+    except Exception as e:
+        core.append_log(f"托盘：开命令行失败 {e}")
 
 
 def open_dsh() -> None:
@@ -197,8 +342,9 @@ class App:
         bar = tk.Frame(self.root)
         bar.pack(fill="x", **pad)
         for text, act in (("立刻扫一次", "scan"), ("打开 DSH", "dsh"),
-                          ("启动宿主", "starthost"), ("暂停轮询", "toggle"),
-                          ("打开报告", "report"), ("刷新", "refresh")):
+                          ("启动宿主", "starthost"), ("命令行", "term"),
+                          ("暂停轮询", "toggle"), ("打开报告", "report"),
+                          ("刷新", "refresh")):
             tk.Button(bar, text=text, width=10, command=lambda a=act: self.q.put(a)).pack(side="left", padx=2)
 
         # 待追问
@@ -273,6 +419,9 @@ class App:
         elif act == "dsh":
             open_dsh()
             self.flash("已在浏览器打开 DSH（「跑一轮」按钮在那里）")
+        elif act == "term":
+            open_terminal()
+            self.flash("已开一个命令行窗口（目录就是 bili-profile）")
         elif act == "starthost":
             threading.Thread(target=self.ensure_host, daemon=True).start()
         elif act == "stophost":
@@ -471,6 +620,7 @@ class App:
 
     def quit(self):
         poller.stopped = True
+        unmark_instance()
         try:
             if self.icon is not None:
                 self.icon.stop()
@@ -503,6 +653,7 @@ def start_tray(app: App):
         pystray.MenuItem("显示窗口", lambda: app.q.put("show"), default=True),
         pystray.MenuItem("立刻扫一次", lambda: app.q.put("scan")),
         pystray.MenuItem("打开 DSH 网页", lambda: app.q.put("dsh")),
+        pystray.MenuItem("打开命令行", lambda: app.q.put("term")),
         pystray.MenuItem("启动宿主（dsh web）", lambda: app.q.put("starthost")),
         pystray.MenuItem("关闭宿主", lambda: app.q.put("stophost")),
         pystray.MenuItem("暂停/继续轮询", lambda: app.q.put("toggle")),
@@ -538,9 +689,15 @@ def selftest():
 
 
 def main():
+    relaunch_without_console()          # 别让黑框控制台跟着常驻
     if "--selftest" in sys.argv:
         selftest()
         return
+    if another_instance():
+        core.append_log("托盘控制台：已经有一个在跑了，这次直接退出")
+        return
+    hide_own_console()                  # 万一是带黑框起的，藏掉它
+    mark_instance()
     global tk
     import tkinter as tk
     with_tray = "--no-tray" not in sys.argv
@@ -557,6 +714,8 @@ if __name__ == "__main__":
     # pythonw 启动时**没有控制台**，崩了什么提示都看不到 ⇒ 必须自己留痕
     try:
         main()
+    except SystemExit:                       # 换成 pythonw 重开自己时的正常退出，不是崩溃
+        pass
     except BaseException as _e:
         import traceback as _tb
         try:

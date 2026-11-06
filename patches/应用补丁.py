@@ -30,6 +30,13 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 CORDIS = HERE / "cordis.patch.yml"
 
+# 下面要打 ✅/⚠️ 这些符号，GBK 控制台下 print 会直接 UnicodeEncodeError
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # (补丁目录名, 插件根目录下的相对路径, 是否还有一份在插件家目录)
 FILES = [
     ("mcp_server", "vendor/bilibili-mcp/mcp_server.py", True),
@@ -160,6 +167,9 @@ def main() -> int:
 
     if saw_index:
         print("\n⚠️ index.js 的改动要**重启 DSH** 才生效（插件是宿主进程加载的）")
+
+    write_launcher(args.check or args.revert)
+
     print("\n完成" + ("（有问题，见上面 ⚠️）" if rc else "，一切正常"))
     return rc
 
@@ -167,6 +177,40 @@ def main() -> int:
 def rellib_name(rel: str) -> str:
     """插件包里的相对路径 → 家目录里对应的文件名（只有 mcp_server.py 这一份）"""
     return pathlib.Path(rel).name
+
+
+def write_launcher(check: bool) -> None:
+    """生成「无黑框启动器」bili-profile/启动控制台.vbs。
+
+    为什么要有：这个 uv venv 里 python.exe 和 pythonw.exe 是同一份 console 子系统复制
+    （各 45568 字节），直接启动必带黑框 —— 换 pythonw 也没用，试过。
+    只有 wscript 的 Run(cmd, 0, ...)（window style 0）才真不给窗口。
+    文件必须写成 UTF-16 LE + BOM：wscript 按 ANSI 读 UTF-8 会把中文路径弄坏。
+    """
+    tpl = HERE / "launcher" / "启动控制台.vbs.tpl"
+    if not tpl.exists():
+        return
+    prof_dir = pathlib.Path(os.environ.get("BILI_PROFILE_DIR") or (HERE.parent / "bili-profile"))
+    target = prof_dir / "启动控制台.vbs"
+    pyw = duty_home() / ".venv" / "Scripts" / "pythonw.exe"
+    script = prof_dir / "托盘控制台.py"
+    print(f"\n=== 启动器（{target.name}）")
+    if not prof_dir.exists():
+        print(f"  — 目录不存在，跳过：{prof_dir}（用 BILI_PROFILE_DIR 指过去）")
+        return
+    if not pyw.exists():
+        print(f"  ⚠️ 没找到 {pyw} —— 先在插件设置里跑一次 bili_setup 建 venv")
+    if not script.exists():
+        print(f"  ⚠️ 没找到 {script}")
+    if check:
+        print(f"  {'已存在' if target.exists() else '可生成'}：{target}")
+        return
+    text = (tpl.read_text(encoding="utf-8")
+            .replace("@PYTHONW@", str(pyw))
+            .replace("@SCRIPT@", str(script)))
+    target.write_bytes(b"\xff\xfe" + text.replace("\n", "\r\n").encode("utf-16-le"))
+    print(f"  已写入 {target}（UTF-16 LE）")
+    print('  桌面快捷方式请指向： wscript.exe "…\\启动控制台.vbs"')
 
 
 if __name__ == "__main__":
