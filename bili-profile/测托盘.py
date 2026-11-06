@@ -141,4 +141,88 @@ if ico.exists():
     print(f"   {ico.name}: {ico.stat().st_size / 1024:.0f} KB，内含 {len(got)} 个尺寸 {got}")
     assert (16, 16) in got and (256, 256) in got, "ICO 缺小尺寸或 256 大图标"
 
+print("\n=== ⑧ 按钮状态机（界面是否「完备」的核心）===")
+#  用真实 tk.Button 跑 App.sync_buttons 这个**未绑定方法**：
+#  不实例化 App ⇒ 不会起 poller / 不会真的去启宿主 / 不会发私信。
+from types import SimpleNamespace
+
+try:
+    import tkinter as tk
+
+    _root = tk.Tk()
+    _root.withdraw()
+except Exception as e:                                   # 没桌面就跳过这组
+    print(f"   ⚠️ 跳过（建不了 Tk 窗口）：{e}")
+    _root = None
+
+if _root is not None:
+    ACTS = ("scan", "dsh", "host", "restarthost", "term", "toggle", "report", "refresh")
+    btns = {a: tk.Button(_root, text="-") for a in ACTS}
+    fake = SimpleNamespace(btns=btns, busy={"host": False}, _host=False, scanning=False)
+
+    def st(a):
+        return btns[a].cget("state")
+
+    def tx(a):
+        return btns[a].cget("text")
+
+    # ① 宿主没跑：启动宿主，且依赖宿主的三项全灰
+    m.App.sync_buttons(fake)
+    print(f"   宿主没跑 → [{tx('host')}]  dsh={st('dsh')}  restart={st('restarthost')}")
+    assert tx("host") == "启动宿主" and st("host") == "normal"
+    assert st("dsh") == "disabled" and st("restarthost") == "disabled"
+    assert st("term") == "normal" and st("refresh") == "normal"      # 恒可用
+
+    # ② 宿主在跑：按钮就该变成「关闭宿主」
+    fake._host = True
+    m.App.sync_buttons(fake)
+    print(f"   宿主在跑 → [{tx('host')}]  dsh={st('dsh')}")
+    assert tx("host") == "关闭宿主"
+    assert st("dsh") == "normal" and st("restarthost") == "normal"
+
+    # ③ 启动/关闭进行中：按钮禁用 + 文本变进行中
+    fake.busy["host"] = True
+    m.App.sync_buttons(fake)
+    print(f"   进行中   → [{tx('host')}] state={st('host')}  dsh={st('dsh')}")
+    assert st("host") == "disabled" and "中" in tx("host")
+    assert st("dsh") == "disabled" and st("restarthost") == "disabled"
+
+    # ④ 扫描中：不能重复点
+    fake.busy["host"] = False
+    fake._host = True
+    fake.scanning = True
+    m.App.sync_buttons(fake)
+    print(f"   扫描中   → [{tx('scan')}] state={st('scan')}")
+    assert tx("scan") == "扫描中…" and st("scan") == "disabled"
+    fake.scanning = False
+
+    # ⑤ 暂停轮询：按钮文本要反过来
+    m.poller.paused = True
+    m.App.sync_buttons(fake)
+    print(f"   暂停中   → [{tx('toggle')}]")
+    assert tx("toggle") == "继续轮询"
+    m.poller.paused = False
+    m.App.sync_buttons(fake)
+    assert tx("toggle") == "暂停轮询"
+
+    # ⑥ 报告按钮：今天没生成过就该是灰的
+    today = m.core.now_bj().strftime("%Y-%m-%d")
+    has = (m.core.OUT / f"{today}.md").exists()
+    print(f"   报告按钮 → state={st('report')}（今天有报告={has}）")
+    assert st("report") == ("normal" if has else "disabled")
+
+    # ⑦ 输入框联动：空着禁用、有内容才亮
+    v = tk.StringVar()
+    b = tk.Button(_root, text="添加", state="disabled")
+    m.App._bind_entry(fake, v, b)
+    assert b.cget("state") == "disabled"
+    v.set("东方project")
+    assert b.cget("state") == "normal"
+    v.set("   ")
+    assert b.cget("state") == "disabled"
+    print("   输入框   → 空=灰 / 有内容=亮 ✓")
+
+    _root.destroy()
+    print("   ✓ 状态机 7 项全过")
+
 print("\n✓ 宿主启动逻辑就绪（spawn 分支等下次开机实测）")

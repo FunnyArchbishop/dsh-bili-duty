@@ -266,6 +266,20 @@ def stop_host() -> str:
         return f"关闭失败：{e}"
 
 
+def restart_host() -> str:
+    """先关再起 —— 让插件 / settings 的改动生效（DSH 的插件是宿主启动时加载的）。
+
+    ⚠️ 这里会真的杀掉 :3080 上的宿主进程；正在跑的会话会断开，
+    但会话本身是持久化的，刷新页面就能接着用。
+    """
+    a = stop_host()
+    t0 = time.time()
+    while host_up() and time.time() - t0 < 20:      # 等端口真正释放，别抢跑
+        time.sleep(0.5)
+    b = start_host()
+    return f"{a}；{b}"
+
+
 # ── 轮询线程 ─────────────────────────────────────────────────────────────
 class Poller(threading.Thread):
     def __init__(self):
@@ -313,9 +327,25 @@ class App:
         self.q: queue.Queue = queue.Queue()
         self.icon = None
         self.scanning = False
+        # 状态机：所有按钮都登记，文本与可用性统一由 sync_buttons() 刷
+        self.btns: dict = {}                 # act -> tk.Button
+        self.busy = {"host": False}          # 宿主正在启/停（期间相关按钮禁用）
+        self._host = False                   # 缓存的宿主状态（refresh 里更新）
+        self._ask_sel: set = set()
+        self._entry_btns: list = []          # (StringVar, Button, 判定函数)
 
         root.title("刷B站 · 控制台")
-        root.geometry("720x660")
+        # 记住上次的窗口位置/大小（关窗或退出时存）
+        GEOF = core.DUTY / "tray-window.json"
+        geom = "720x660"
+        try:
+            g = core.read_json(GEOF, {}) or {}
+            x, y, w, h = (int(g.get(k) or 0) for k in ("x", "y", "w", "h"))
+            if w >= 560 and h >= 420:          # 太小/越界就退回默认
+                geom = f"{w}x{h}+{x}+{y}"
+        except Exception:
+            pass
+        root.geometry(geom)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         apply_window_icon(root)
 
@@ -342,11 +372,15 @@ class App:
         # 行按钮
         bar = tk.Frame(self.root)
         bar.pack(fill="x", **pad)
-        for text, act in (("立刻扫一次", "scan"), ("打开 DSH", "dsh"),
-                          ("启动宿主", "starthost"), ("命令行", "term"),
-                          ("暂停轮询", "toggle"), ("打开报告", "report"),
-                          ("刷新", "refresh")):
-            tk.Button(bar, text=text, width=10, command=lambda a=act: self.q.put(a)).pack(side="left", padx=2)
+        # 顺序固定；文本/可用状态全部交给 sync_buttons()，别在这儿写死
+        for act, text in (("scan", "立刻扫一次"), ("dsh", "打开 DSH"),
+                          ("host", "启动宿主"), ("restarthost", "重启宿主"),
+                          ("term", "命令行"),
+                          ("toggle", "暂停轮询"), ("report", "打开报告"),
+                          ("refresh", "刷新")):
+            b = tk.Button(bar, text=text, width=10, command=lambda a=act: self.q.put(a))
+            b.pack(side="left", padx=2)
+            self.btns[act] = b
 
         # 待追问
         self.f_ask = tk.LabelFrame(self.root, text="待回答的追问")
@@ -365,9 +399,13 @@ class App:
         self.lb_kw.pack(side="left", fill="both", expand=True)
         side = tk.Frame(row)
         side.pack(side="left", padx=4)
-        self.e_kw = tk.Entry(side, width=14)
+        self.v_kw = tk.StringVar()
+        self.e_kw = tk.Entry(side, width=14, textvariable=self.v_kw)
         self.e_kw.pack(fill="x")
-        tk.Button(side, text="添加", width=8, command=self.add_kw).pack(fill="x", pady=2)
+        self.btn_kw_add = tk.Button(side, text="添加", width=8, command=self.add_kw)
+        self.btn_kw_add.pack(fill="x", pady=2)
+        self._bind_entry(self.v_kw, self.btn_kw_add)
+        self.e_kw.bind("<Return>", lambda _e: self.add_kw())
         tk.Button(side, text="删所选", width=8, command=self.del_kw).pack(fill="x")
 
         # 屏蔽 + 闸门
@@ -379,33 +417,55 @@ class App:
         self.lb_mute.pack(side="left", fill="both", expand=True)
         s2 = tk.Frame(g)
         s2.pack(side="left", padx=4)
-        self.e_mute = tk.Entry(s2, width=14)
+        self.v_mute = tk.StringVar()
+        self.e_mute = tk.Entry(s2, width=14, textvariable=self.v_mute)
         self.e_mute.pack(fill="x")
-        tk.Button(s2, text="屏蔽", width=8, command=self.add_mute).pack(fill="x", pady=2)
+        self.btn_mute_add = tk.Button(s2, text="屏蔽", width=8, command=self.add_mute)
+        self.btn_mute_add.pack(fill="x", pady=2)
+        self._bind_entry(self.v_mute, self.btn_mute_add)
+        self.e_mute.bind("<Return>", lambda _e: self.add_mute())
         tk.Button(s2, text="解除", width=8, command=self.del_mute).pack(fill="x")
         s3 = tk.Frame(g)
         s3.pack(side="left", padx=6)
         tk.Label(s3, text="时长上限(分钟, 0=不限)").pack(anchor="w")
-        self.e_maxlen = tk.Entry(s3, width=8)
+        self.v_maxlen = tk.StringVar()
+        self.e_maxlen = tk.Entry(s3, width=8, textvariable=self.v_maxlen)
         self.e_maxlen.pack(anchor="w")
         tk.Label(s3, text="播放量下限(0=不限)").pack(anchor="w")
-        self.e_minplay = tk.Entry(s3, width=8)
+        self.v_minplay = tk.StringVar()
+        self.e_minplay = tk.Entry(s3, width=8, textvariable=self.v_minplay)
         self.e_minplay.pack(anchor="w")
-        tk.Button(s3, text="应用闸门", width=10, command=self.apply_gate).pack(anchor="w", pady=2)
+        self.btn_gate = tk.Button(s3, text="应用闸门", width=10, command=self.apply_gate)
+        self.btn_gate.pack(anchor="w", pady=2)
+        self._bind_entry(self.v_maxlen, self.btn_gate, self.v_minplay)
+        for _e in (self.e_maxlen, self.e_minplay):
+            _e.bind("<Return>", lambda _ev: self.apply_gate())
 
         # 台账
         self.f_led = tk.LabelFrame(self.root, text="最近台账")
         self.f_led.pack(fill="both", expand=True, **pad)
-        self.txt = tk.Text(self.f_led, height=8, wrap="none")
-        self.txt.pack(fill="both", expand=True, padx=6, pady=2)
+        box = tk.Frame(self.f_led)
+        box.pack(fill="both", expand=True, padx=6, pady=2)
+        sb = tk.Scrollbar(box)
+        sb.pack(side="right", fill="y")
+        self.txt = tk.Text(box, height=8, wrap="none", yscrollcommand=sb.set)
+        self.txt.pack(side="left", fill="both", expand=True)
+        sb.configure(command=self.txt.yview)
         self.txt.configure(state="disabled")
 
     # ── 动作队列：托盘线程/按钮 → 主线程 ────────────────────────────────
     def pump(self):
         try:
             while True:
-                act = self.q.get_nowait()
-                self.handle(act)
+                item = self.q.get_nowait()
+                if isinstance(item, tuple):        # 后台线程只敢投递，不直接碰 Tk
+                    kind, payload = item
+                    if kind == "flash":
+                        self.flash(payload)
+                    elif kind == "sync":
+                        self.sync_buttons()
+                    continue
+                self.handle(item)
         except queue.Empty:
             pass
         self.root.after(250, self.pump)
@@ -423,10 +483,14 @@ class App:
         elif act == "term":
             open_terminal()
             self.flash("已开一个命令行窗口（目录就是 bili-profile）")
+        elif act == "host":
+            self.on_host_button()
         elif act == "starthost":
-            threading.Thread(target=self.ensure_host, daemon=True).start()
+            self.on_host_button(force="start")
+        elif act == "restarthost":
+            self.do_restart_host()
         elif act == "stophost":
-            self.flash(stop_host())
+            self.on_host_button(force="stop")
         elif act == "toggle":
             poller.paused = not poller.paused
             self.flash("轮询已暂停" if poller.paused else "轮询已恢复")
@@ -455,11 +519,107 @@ class App:
             self.scanning = False
         threading.Thread(target=work, daemon=True).start()
 
+    # ── 宿主状态机 ──────────────────────────────────────────────────────
+    #    一个按钮两种语义（启动 / 关闭），操作期间禁用并显示"进行中"；
+    #    「打开 DSH」「重启宿主」依赖宿主在跑，否则禁用。
+    def on_host_button(self, force: str | None = None) -> None:
+        """force='start'/'stop' 供托盘菜单用；不传就按当前状态切换。"""
+        if self.busy["host"]:
+            return
+        closing = (force == "stop") if force else bool(self._host)
+        self.busy["host"] = True
+        self.sync_buttons()
+        threading.Thread(target=self._host_task, args=(closing,), daemon=True).start()
+
+    def _host_task(self, closing: bool) -> None:
+        try:
+            self.flash_from("正在关闭 DSH 宿主…" if closing else "正在启动 DSH 宿主…（首次要等十几秒）")
+            msg = stop_host() if closing else start_host()
+            if not closing:
+                msg += "　（本控制台启动的）" if _HOST["we_started"] else ""
+            self.flash_from(msg)
+            core.append_log("托盘：" + msg)
+        except Exception as e:
+            self.flash_from(f"宿主操作失败：{e}")
+            core.append_log(f"托盘：宿主操作失败 {e}")
+        finally:
+            self.busy["host"] = False
+            self.q.put(("sync", None))
+
     def ensure_host(self):
-        self.flash("正在检查 DSH 宿主…")
-        msg = start_host()
-        self.flash(msg + ("　（本控制台启动的）" if _HOST["we_started"] else ""))
-        core.append_log("托盘：" + msg)
+        """开机时拉一次宿主（只启动、不关闭）"""
+        self.on_host_button(force="start")
+
+    def do_restart_host(self):
+        if self.busy["host"]:
+            return
+        self.busy["host"] = True
+        self.sync_buttons()
+
+        def work():
+            try:
+                self.flash_from("正在重启 DSH 宿主…（会断一下，刷新就回来）")
+                msg = restart_host()
+                self.flash_from(msg)
+                core.append_log("托盘：" + msg)
+            except Exception as e:
+                self.flash_from(f"重启失败：{e}")
+            finally:
+                self.busy["host"] = False
+                self.q.put(("sync", None))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # ── 按钮可用状态（唯一定义处）──────────────────────────────────────
+    def sync_buttons(self) -> None:
+        """按"宿主 / 扫描 / 暂停 / 有无报告"刷新每个按钮的文本与可用性。"""
+        if not self.btns:
+            return
+        busy, up = self.busy["host"], bool(self._host)
+        try:
+            # ① 宿主按钮：启动 ↔ 关闭 ↔ 进行中
+            b = self.btns["host"]
+            if busy:
+                b.configure(text="启动中…" if not up else "关闭中…", state="disabled")
+            else:
+                b.configure(text="关闭宿主" if up else "启动宿主", state="normal")
+            # ② 依赖宿主的两个
+            for act in ("dsh", "restarthost"):
+                self.btns[act].configure(state="normal" if (up and not busy) else "disabled")
+            # ③ 扫描：进行中禁止重复点
+            sc = self.btns["scan"]
+            sc.configure(text="扫描中…" if self.scanning else "立刻扫一次",
+                         state="disabled" if self.scanning else "normal")
+            # ④ 暂停/继续：文本跟着状态
+            self.btns["toggle"].configure(text="继续轮询" if poller.paused else "暂停轮询")
+            # ⑤ 报告：今天还没生成就禁用
+            today = core.now_bj().strftime("%Y-%m-%d")
+            self.btns["report"].configure(
+                state="normal" if (core.OUT / f"{today}.md").exists() else "disabled")
+            # ⑥ 命令行 / 刷新 恒可用（不用动）
+        except Exception as e:
+            core.append_log(f"sync_buttons 出错：{e}")
+
+    # ── 输入框联动：空着就别让点 ────────────────────────────────────────
+    def _bind_entry(self, var, btn, *others) -> None:
+        """输入框有内容才启用按钮（others 里的变量也参与判定：任一有内容即可）"""
+        vars_ = (var,) + others
+
+        def upd(*_):
+            try:
+                ok = any((v.get() or "").strip() for v in vars_)
+                btn.configure(state="normal" if ok else "disabled")
+            except Exception:
+                pass
+
+        var.trace_add("write", upd)
+        for v in others:
+            v.trace_add("write", upd)
+        upd()
+
+    def flash_from(self, msg: str) -> None:
+        """后台线程更新状态行 —— 投递到主线程，别直接碰 Tk"""
+        self.q.put(("flash", msg))
 
     def flash(self, msg: str):
         self.lbl_state.configure(text=msg)
@@ -540,13 +700,19 @@ class App:
         picked = core.count_picked_today(today)
         age = core.last_scan_age()
 
-        host = ("宿主在跑" + ("（本控制台起的）" if _HOST["we_started"] else "")) if host_up() \
-            else "宿主没跑（值班轮不会自动触发）"
+        self._host = host_up()            # 状态机以这个为准
+        if self.busy["host"]:
+            host = "宿主状态变化中…"
+        elif self._host:
+            host = "宿主在跑" + ("（本控制台起的）" if _HOST["we_started"] else "")
+        else:
+            host = "宿主没跑（值班轮不会自动触发）"
         poll_state = "已暂停" if poller.paused else f"每 {POLL_SECONDS} 秒"
         self.lbl_state.configure(
             text=f"今天 {picked} / {cfg.get('perDay', 0)}　关键词 {len(cfg.get('keywords') or [])}　"
                  f"轮询{poll_state}　{host}")
         self.lbl_scan.configure(text=f"上次扫私信 {age}" + (f"　⚠️ {poller.last_error}" if poller.last_error else ""))
+        self.sync_buttons()               # ← 界面是否"完备"全看这一句
 
         # 关键词
         kws = cfg.get("keywords") or []
@@ -582,10 +748,17 @@ class App:
                      f"{'好在哪' if q.get('kind') == 'good' else '差在哪'}？点按钮（可多选后再点确认）")
             self._ask_sel = set()
 
+            def _ask_btn_state():
+                try:
+                    self._ask_confirm.configure(state="normal" if self._ask_sel else "disabled")
+                except Exception:
+                    pass
+
             def toggle(n):
                 self._ask_sel ^= {n}
                 self.lbl_ask.configure(text=self.lbl_ask.cget("text").split("｜已选")[0] +
                                        f"｜已选 {sorted(self._ask_sel) or '无'}")
+                _ask_btn_state()
 
             col = 0
             for i, t in enumerate(tags, 1):
@@ -594,8 +767,11 @@ class App:
             for i, w in enumerate(words, len(tags) + 1):
                 tk.Button(self.f_ask_btns, text=f"{i} {w}", command=lambda n=i: toggle(n)).grid(row=0, column=col)
                 col += 1
-            tk.Button(self.f_ask_btns, text="确认", bg="#dff0d8",
-                      command=lambda: self.answer_ask(sorted(self._ask_sel))).grid(row=0, column=col + 1)
+            self._ask_confirm = tk.Button(
+                self.f_ask_btns, text="确认", bg="#dff0d8", state="disabled",
+                command=lambda: self.answer_ask(sorted(self._ask_sel)))
+            self._ask_confirm.grid(row=0, column=col + 1)
+            _ask_btn_state()
 
         # 台账
         rows = core.ledger()[-10:]
@@ -612,7 +788,19 @@ class App:
             self.txt.configure(state="disabled")
 
     # ── 关窗 = 缩托盘 ───────────────────────────────────────────────────
+    def _save_geom(self) -> None:
+        """把窗口位置/大小记下来，下次打开还原"""
+        try:
+            self.root.update_idletasks()
+            core.write_json(core.DUTY / "tray-window.json", {
+                "x": self.root.winfo_x(), "y": self.root.winfo_y(),
+                "w": self.root.winfo_width(), "h": self.root.winfo_height(),
+            })
+        except Exception:
+            pass
+
     def on_close(self):
+        self._save_geom()
         if self.with_tray and self.icon is not None:
             self.root.withdraw()
             self.flash("已缩到托盘，轮询继续")
@@ -620,6 +808,7 @@ class App:
             self.quit()
 
     def quit(self):
+        self._save_geom()
         poller.stopped = True
         unmark_instance()
         try:
@@ -691,8 +880,12 @@ def start_tray(app: App):
         pystray.MenuItem("立刻扫一次", lambda: app.q.put("scan")),
         pystray.MenuItem("打开 DSH 网页", lambda: app.q.put("dsh")),
         pystray.MenuItem("打开命令行", lambda: app.q.put("term")),
-        pystray.MenuItem("启动宿主（dsh web）", lambda: app.q.put("starthost")),
-        pystray.MenuItem("关闭宿主", lambda: app.q.put("stophost")),
+        pystray.MenuItem("启动宿主（dsh web）", lambda: app.q.put("starthost"),
+                         enabled=lambda item: (not app._host) and not app.busy["host"]),
+        pystray.MenuItem("关闭宿主", lambda: app.q.put("stophost"),
+                         enabled=lambda item: bool(app._host) and not app.busy["host"]),
+        pystray.MenuItem("重启宿主（让插件生效）", lambda: app.q.put("restarthost"),
+                         enabled=lambda item: bool(app._host) and not app.busy["host"]),
         pystray.MenuItem("暂停/继续轮询", lambda: app.q.put("toggle")),
         pystray.MenuItem("打开报告", lambda: app.q.put("report")),
         pystray.Menu.SEPARATOR,
