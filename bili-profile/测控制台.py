@@ -96,6 +96,41 @@ eq("预检认出闲聊", "聊天" in r4, True)
 eq("预检确实没改配置",
    json.loads(pathlib.Path(m.CFG).read_text(encoding="utf-8")), before_cfg)
 
+print("\n=== 8. /give 立刻刷一轮 ===")
+#  ⚠️ 全部走 SIMULATE（预览），绝不真的起轮子 —— 起一轮要烧钱几分钟
+m.SIMULATE = True
+g = m.cmd_give(["5"])
+eq("give 5 走预览不起进程", "预览模式" in g, True)
+eq("give 5 说的是 5 条", "挑 5 条" in g, True)
+eq("give 没给数字 → 用法", "用法" in m.cmd_give([]), True)
+eq("give abc → 用法", "用法" in m.cmd_give(["abc"]), True)
+eq("give 0 → 用法", "用法" in m.cmd_give(["0"]), True)
+eq("give 99 → 夹到上限 10", "挑 10 条" in m.cmd_give(["99"]), True)
+eq("give 上限常量", m.GIVE_MAX, 10)
+eq("give 冷却常量", m.GIVE_COOLDOWN_MIN, 5)
+eq("give 已注册", "give" in m.cmds(), True)
+eq("help 里有 give", "/give" in m.cmd_help([]), True)
+
+# 提示词本身：必须内联章程（那一轮没有文件系统、读不到 duty.md）、且塞得进命令行
+_pr = m.build_give_prompt(3)
+eq("提示词写着只挑 3 条", "只挑 3 条" in _pr, True)
+eq("提示词写着手动触发", "手动触发" in _pr, True)
+eq("提示词要求 ### BV 行", "### BV" in _pr, True)
+eq("提示词内联了章程（不是只给路径）", "值班章程" in _pr and len(_pr) > 5000, True)
+eq("提示词长度塞得进 Windows 命令行", len(_pr) < 32000, True)
+print(f"   build_give_prompt(3) = {len(_pr)} 字符")
+
+# 冷却：写进 lastGiveAt 之后就该被挡住
+_st = json.loads(pathlib.Path(m.STATE).read_text(encoding="utf-8")) if pathlib.Path(m.STATE).exists() else {}
+_keep = dict(_st)
+try:
+    _st["lastGiveAt"] = m.now_bj().timestamp()
+    pathlib.Path(m.STATE).write_text(json.dumps(_st), encoding="utf-8")
+    eq("冷却期内拒绝", "刚给过一轮" in m.cmd_give(["3"]), True)
+finally:
+    pathlib.Path(m.STATE).write_text(json.dumps(_keep), encoding="utf-8")
+m.SIMULATE = False
+
 print(f"\n通过 {ok} · 失败 {fail}")
 if fail:
     sys.exit(1)

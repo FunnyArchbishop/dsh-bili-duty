@@ -535,6 +535,123 @@ def cmd_gate(args: list[str]) -> str:
     )
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+#  /give N —— 立刻刷一轮，只挑 N 条发给你（2026-11-06 加）
+# ══════════════════════════════════════════════════════════════════════════
+# 为什么是"起一轮值班"而不是自己搜：挑片、读字幕、投递闸门、私信发送全在
+# 章程和 mcp_server 的两道闸里，自己搜等于把那一整套重写一遍、还绕过了所有闸。
+GIVE_MAX = 10            # 一次最多要几条（再多没意义，也烧钱）
+GIVE_COOLDOWN_MIN = 5    # 两次 /give 之间冷却（防手滑连点）
+
+
+def build_give_prompt(n: int) -> str:
+    """拼「手动跑一轮、只挑 N 条」的提示词。
+
+    ⚠️ 章程必须**内联**：值班轮是最小权限 profile，没有文件系统，
+       那一轮根本读不了 duty.md（插件 index.js 的 promptFor 也这么干）。
+    """
+    cfg = read_json(CFG, {}) or {}
+    today = now_bj().strftime("%Y-%m-%d")
+    out = DUTY / "out" / f"{today}.md"
+    kws = " · ".join(cfg.get("keywords") or []) or "（空，按章程里的方向自己找）"
+    ex = [str(x).strip() for x in (cfg.get("excludeWords") or []) if str(x).strip()]
+
+    head = ["你是这个账号的 B站 助手。下面是**值班章程** —— 严格按它执行：", ""]
+    tail = [
+        "",
+        f"⭐ 这一轮是**手动触发（私信 /give {n}）**：现在就刷，不占今天的自动额度。",
+        f"⭐ **只挑 {n} 条**，挑完就收 —— 别多挑，也别把全天要看的量一次挑光。",
+        f"把报告写到 {out}；那份今天可能已经有内容，有就**追加到末尾**、别覆盖。",
+        "⭐ 报告里每挑中一条，第一行写成 `### BV号`（宿主就数这些标题行算挑了几条）。",
+        f"搜索关键词：{kws}",
+    ]
+    if ex:
+        tail.append(f"⛔ 排除词（先过这一关）：{'、'.join(ex)} —— 标题/UP名/简介里出现这些词的整条跳过。")
+    if str(cfg.get("dmMode") or "") == "only":
+        tail.append("投递：只私信（发完不用评论）。")
+    tail.append(
+        f"挑完把 {n} 条一次性私信发给我：每条给 BV 号 + 标题 + 一句为什么值得看。"
+        "实在发不出去就把原因写进报告。")
+
+    try:
+        charter = (DUTY / "duty.md").read_text(encoding="utf-8").replace("<家目录>", str(DUTY))
+    except Exception:
+        charter = f"（章程没读到 —— 按你平时的方式刷一轮；家目录 = {DUTY}）"
+
+    # Windows 命令行上限 32767 字符：超了就截章程，别让 spawn 直接失败
+    fixed = len("\n".join(head)) + len("\n".join(tail)) + 200
+    budget = max(2000, 30000 - fixed)
+    if len(charter) > budget:
+        charter = charter[:budget] + "\n（章程过长，已截断）"
+    return "\n".join(head + [charter] + tail)
+
+
+def spawn_round(prompt: str) -> int:
+    """起一轮值班，**不等它跑完**，返回 pid。
+
+    一轮要 2~5 分钟；控制台每分钟扫一次，同步等会把扫描卡死。
+    """
+    cmd = [NODE, DSH_BIN, "--profile", "bili-duty", "--patch", str(OVERLAY), prompt]
+    env = {**os.environ, "BILI_DUTY_HOME": str(DUTY),
+           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    flags = (0x00000008 | 0x08000000) if os.name == "nt" else 0   # DETACHED | CREATE_NO_WINDOW
+    log = (DUTY / "duty.log").open("a", encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(DUTY), env=env,
+                                stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT,
+                                creationflags=flags)
+    finally:
+        log.close()
+    return proc.pid
+
+
+def cmd_give(args: list[str]) -> str:
+    """/give N —— 立刻刷一轮，只挑 N 条推荐给你。"""
+    import time as _t
+
+    n = 0
+    for a in args:
+        if re.fullmatch(r"\d+", (a or "").strip()):
+            n = int(a.strip())
+            break
+    if n <= 0:
+        return (f"用法：/give 5\n立刻刷一轮，只挑 N 条发给你（1~{GIVE_MAX}）；"
+                "不占今天的自动额度，跑完会私信。")
+    n = max(1, min(GIVE_MAX, n))
+
+    if duty_busy():
+        return "正在刷着一轮了 —— 等它跑完再发 /give（不然两边抢 B站 请求，都会变慢）。"
+    if not OVERLAY.exists():
+        return f"找不到值班轮用的 overlay：{OVERLAY}\n先在 DSH 里点一次「跑一轮」，它会生成这份文件。"
+
+    st = read_json(STATE, {}) or {}
+    last = float(st.get("lastGiveAt") or 0)
+    if last:
+        left = GIVE_COOLDOWN_MIN * 60 - (_t.time() - last)
+        if left > 0:
+            return (f"刚给过一轮（{int((_t.time() - last) // 60)} 分钟前），"
+                    f"再等 {int(left // 60) + 1} 分钟 —— 防手滑连点把额度烧光。")
+
+    if SIMULATE:
+        return (f"（预览模式）会起一轮值班，挑 {n} 条，报告写进 out/{now_bj().strftime('%Y-%m-%d')}.md\n"
+                f"命令：{' '.join([NODE, DSH_BIN, '--profile', 'bili-duty', '--patch', str(OVERLAY)])} …")
+
+    try:
+        pid = spawn_round(build_give_prompt(n))
+    except Exception as e:
+        append_log(f"give 起轮失败：{e}")
+        return f"起轮失败：{e}"
+
+    st["lastGiveAt"] = _t.time()
+    write_json(STATE, st)
+    append_log(f"give {n} → pid {pid}")
+    return (f"已开刷：挑 {n} 条（pid {pid}）。\n"
+            f"跑完它会自己私信发过来，完整报告写进 out/{now_bj().strftime('%Y-%m-%d')}.md。\n"
+            "大概 2~5 分钟；这期间别再发 /give。")
+
+
 def cmds():
     return {
         "debug": cmd_debug, "kw": cmd_kw, "list": cmd_list,
@@ -542,6 +659,7 @@ def cmds():
         "status": cmd_status, "cost": cmd_cost, "help": cmd_help,
         "mute": cmd_mute, "unmute": cmd_unmute, "ban": cmd_ban, "gate": cmd_gate,
         "查": cmd_check, "check": cmd_check,
+        "give": cmd_give,
     }
 
 
@@ -657,6 +775,7 @@ def cmd_help(_args) -> str:
         "/last 今天挑了哪些 ｜ /list 最近台账\n"
         "/buf 缓冲区 ｜ /cost 今天花多少\n"
         "/答 1 3 回答追问（也可以直接说一句）\n"
+        "/give 5   立刻刷一轮，只挑 5 条给你（不占自动额度，跑完私信）\n"
         "\n【随时】/查 <一句话> 预检我会怎么理解（不记账、不改配置）\n"
         "私信里直接说「加词：X」「删词：X」也行，我立刻回执"
     )
