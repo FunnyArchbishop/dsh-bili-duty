@@ -652,6 +652,67 @@ def cmd_give(args: list[str]) -> str:
             "大概 2~5 分钟；这期间别再发 /give。")
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+#  定时投递 —— 在他真正看片之前各送一批（2026-11-07 加）
+# ══════════════════════════════════════════════════════════════════════════
+# 为什么不用插件的谷时窗口：
+#   · 插件窗口是 noon 12:00-14:00 / night 18:00-09:00（硬编码）；
+#   · 而他 37 条打分记录的时刻集中在 12:00-13:00 和 22:00-23:00
+#     ⇒ 12:00 发已经晚了半步，18:00 发要等 4~5 小时才看，沉底；
+#   · 而且 inWindow() 里「周末全天算谷时」直接 return true ⇒ 周六 00:00 的第一跳
+#     就把当天 noon/night 标记全吃掉，白天再也不会跑（11-07 整天没发就是这个）。
+# 所以关掉插件那两个开关（config.json: noon/night = false），改由这里按点起轮。
+AUTO_SEND_TIMES = ["11:30", "21:30"]   # 中午场 / 深夜场开始之前
+AUTO_SEND_PER = 8                      # 每次挑几条
+AUTO_SEND_GRACE_MIN = 90               # 错过时间点后多久内仍补发（休眠/关机回来还赶得上）
+
+
+def _auto_send_due(now, sent: list) -> str | None:
+    """现在该不该发？返回命中的时间点（"11:30"），否则 None。"""
+    hm = now.hour * 60 + now.minute
+    for slot in AUTO_SEND_TIMES:
+        if slot in sent:
+            continue
+        try:
+            h, m = (int(x) for x in slot.split(":"))
+        except Exception:
+            continue
+        start = h * 60 + m
+        if start <= hm < start + AUTO_SEND_GRACE_MIN:
+            return slot
+    return None
+
+
+def maybe_auto_send(dry: bool) -> str:
+    """到点就起一轮值班。返回一句话（没到点 / 起不来都返回空或原因）。"""
+    if not AUTO_SEND_TIMES:
+        return ""
+    st = read_json(STATE, {}) or {}
+    today = now_bj().strftime("%Y-%m-%d")
+    sent = list((st.get("autoSent") or {}).get(today) or [])
+    slot = _auto_send_due(now_bj(), sent)
+    if not slot:
+        return ""
+    if duty_busy():
+        return ""                                    # 正在跑就别叠，下一跳再看
+    if not OVERLAY.exists():
+        return "（自动投递跳过：没有 headless-overlay.yml）"
+    if dry:
+        return f"（预览）到点 {slot}，会起一轮挑 {AUTO_SEND_PER} 条"
+    try:
+        pid = spawn_round(build_give_prompt(AUTO_SEND_PER))
+    except Exception as e:
+        append_log(f"自动投递起轮失败：{e}")
+        return f"（自动投递起轮失败：{e}）"
+    auto = dict(st.get("autoSent") or {})
+    auto[today] = sent + [slot]
+    st["autoSent"] = auto
+    write_json(STATE, st)
+    append_log(f"自动投递 {slot} → pid {pid}（{AUTO_SEND_PER} 条）")
+    return f"到点 {slot}，已起一轮挑 {AUTO_SEND_PER} 条（pid {pid}）"
+
+
 def cmds():
     return {
         "debug": cmd_debug, "kw": cmd_kw, "list": cmd_list,
@@ -772,6 +833,7 @@ def cmd_help(_args) -> str:
         '【刷B站 · 私信命令】\n'
         '扫私信 15~60 秒一次\n'
         '不是秒回，急事去托盘\n'
+        '11:30 / 21:30 各送一批\n'
         '\n'
         '─ 改状态 ─\n'
         '/kw add 词  加词\n'
@@ -1258,6 +1320,14 @@ async def run(dry: bool, simulate: str | None) -> None:
         hb["lastScan"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
         hb["scans"] = int(hb.get("scans") or 0) + 1
         write_json(STATE, hb)
+    # ⭐ 到点就自动起一轮（不依赖插件的谷时窗口）——必须放在「没新消息就 return」之前
+    try:
+        note = maybe_auto_send(dry)
+        if note:
+            print("[自动投递] " + note)
+    except Exception as e:
+        append_log(f"自动投递出错：{e}")
+
     incoming = [m for m in msgs if not m["from_me"]]
     if not incoming:
         if not dry:

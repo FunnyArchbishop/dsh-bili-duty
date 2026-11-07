@@ -150,6 +150,28 @@ for _cmd in ("/kw add", "/kw del", "/mute", "/unmute", "/ban", "/gate", "/learn"
              "/give", "/查", "/help"):
     eq(f"help 列了 {_cmd}", _cmd in _h, True)
 
+print("\n=== 10. 定时投递（11:30 / 21:30）===")
+import datetime as _dt
+
+_BJ = _dt.timezone(_dt.timedelta(hours=8))
+
+
+def _at(h, mi):
+    return _dt.datetime(2026, 11, 7, h, mi, tzinfo=_BJ)
+
+
+eq("两个时间点", m.AUTO_SEND_TIMES, ["11:30", "21:30"])
+eq("每次条数", m.AUTO_SEND_PER, 8)
+eq("11:29 还没到", m._auto_send_due(_at(11, 29), []), None)
+eq("11:30 到点", m._auto_send_due(_at(11, 30), []), "11:30")
+eq("12:59 仍在宽限内（休眠回来赶得上）", m._auto_send_due(_at(12, 59), []), "11:30")
+eq("13:00 过了宽限就不补", m._auto_send_due(_at(13, 0), []), None)
+eq("已发过就不再发", m._auto_send_due(_at(11, 30), ["11:30"]), None)
+eq("21:30 到点", m._auto_send_due(_at(21, 30), ["11:30"]), "21:30")
+eq("22:59 宽限内", m._auto_send_due(_at(22, 59), ["11:30"]), "21:30")
+eq("23:01 过了", m._auto_send_due(_at(23, 1), ["11:30"]), None)
+eq("两个都发过 → 不再发", m._auto_send_due(_at(21, 40), ["11:30", "21:30"]), None)
+
 print(f"\n通过 {ok} · 失败 {fail}")
 if fail:
     sys.exit(1)
