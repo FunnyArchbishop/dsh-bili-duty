@@ -123,7 +123,14 @@ def relaunch_without_console() -> None:
 
 
 def load_core():
-    """复用 私信控制台.py 的全部逻辑（不重复造一遍读写/改配置的代码）"""
+    """复用 私信控制台.py 的全部逻辑（不重复造一遍读写/改配置的代码）。
+
+    ⚠️ 这是**进程启动时一次性**加载的：改了 `私信控制台.py`（比如加/改指令文案）
+       之后，托盘里每 15 秒的轮询还在跑内存里的旧代码 ⇒ **必须重启托盘 App 才生效**。
+       计划任务那边每次都是新进程、能拿到新代码，但它抢不到锁 ——
+       托盘每 15 秒就把 console.lock 占住了（2026-11-07 实测：改了 /help，
+       日志里两次 /help 都是旧版回的，因为托盘一直在用旧模块）。
+    """
     spec = importlib.util.spec_from_file_location("bili_core", HERE / "私信控制台.py")
     m = importlib.util.module_from_spec(spec)
     sys.modules["bili_core"] = m
