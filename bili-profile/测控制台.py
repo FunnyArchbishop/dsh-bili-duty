@@ -131,6 +131,25 @@ finally:
     pathlib.Path(m.STATE).write_text(json.dumps(_keep), encoding="utf-8")
 m.SIMULATE = False
 
+print("\n=== 9. /help 版式 ===")
+_h = m.cmd_help([])
+
+
+def _disp(s):
+    return sum(2 if ord(c) > 0x2E80 else 1 for c in s)
+
+
+eq("help 不带星号（私信不是 markdown）", "**" not in _h, True)
+eq("help 塞得进一条私信（≤460 字）", len(_h) <= 460, True)
+eq("help 只分 1 片", len(m.chunk(_h)), 1)
+_eq_w = max(_disp(ln) for ln in _h.splitlines())
+eq("最宽一行 ≤ 26", _eq_w <= 26, True)
+print("   字符数:", len(_h), "｜最宽行宽:", _eq_w)
+for _cmd in ("/kw add", "/kw del", "/mute", "/unmute", "/ban", "/gate", "/learn",
+             "/debug", "/status", "/last", "/list", "/buf", "/cost", "/答",
+             "/give", "/查", "/help"):
+    eq(f"help 列了 {_cmd}", _cmd in _h, True)
+
 print(f"\n通过 {ok} · 失败 {fail}")
 if fail:
     sys.exit(1)
