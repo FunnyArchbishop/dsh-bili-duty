@@ -1,11 +1,10 @@
-diff --git a/vendor/bilibili-mcp/mcp_server.py b/vendor/bilibili-mcp/mcp_server.py
-index e555990..2722049 100755
 --- a/vendor/bilibili-mcp/mcp_server.py
 +++ b/vendor/bilibili-mcp/mcp_server.py
-@@ -57,6 +57,15 @@ mcp = FastMCP("bilibili-mcp")
+@@ -56,6 +56,15 @@
+ #    · 给了 ⇒ 只注册名单里的；不在名单里的工具**连名字都不会出现在 list_tools 里**，
  #      模型那边等于根本不存在 —— 这才是真的闸门（光靠提示词说"别用"不算）✓
  _ALLOWED = {t.strip() for t in os.environ.get("BILI_MCP_TOOLS", "").split(",") if t.strip()}
- 
++
 +# ⭐⭐ 2026-11-05：**召回工具不受白名单限制**。
 +#   起因：值班轮以前只能看到 bili_search / bili_recommend ⇒ 候选永远是"搜索那几百条 +
 +#   全时段播放量排序"⇒ 反复端上同一批历史头部，候选池很快枯竭（使用者实测：都不够看了）。
@@ -14,11 +13,10 @@ index e555990..2722049 100755
 +_ALWAYS = {"bili_rank", "bili_hot_videos", "bili_weekly_hot", "bili_video_zones"}
 +if _ALLOWED:
 +    _ALLOWED |= _ALWAYS
-+
+ 
  
  def tool():
-     """@tool() 的替身：白名单里没有这个函数名，就原样返回、**不注册**。"""
-@@ -402,7 +411,15 @@ async def bili_search(keyword: str, num: int = 10, order: str = "totalrank", pag
+@@ -402,7 +411,15 @@
          num: 返回视频数量，默认10，最大50
          order: 排序方式 totalrank=综合 click=播放量 pubdate=最新 dm=弹幕
          page: 第几页，从 1 开始（一页约 20 条；想多看一屏就翻页）
@@ -35,10 +33,70 @@ index e555990..2722049 100755
      Returns:
          JSON格式的视频列表，包含标题、BV号、播放量、评论数、UP主等
      """
-@@ -1149,6 +1166,184 @@ async def bili_favorite_content(media_id: int, page: int = 1, keyword: str = "")
+@@ -1149,6 +1166,244 @@
      }, ensure_ascii=False)
  
  
++# ========== 发送前「重复投递」检查（2026-11-08 加）==========
++# 为什么要在代码里拦：章程只让模型 duty_seen_recent(limit=40) 查最近 40 条，
++# 而判重表里已经有 110 条「挑了」⇒ 更早的它看不到；靠"自觉判重"迟早重复推。
++_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
++
++
++def _delivered_bvids() -> set:
++    """历史上**推送过**的 BV：判重表标了「挑了」的 + 任何一天日报里的 ### 行。
++
++    ⚠️「跳过」不算推过 —— 那只是没挑，下次还该有机会。
++    """
++    got: set = set()
++    try:
++        for line in (DUTY_HOME / "seen.md").read_text(encoding="utf-8", errors="replace").splitlines():
++            parts = [p.strip() for p in line.split("|")]
++            if len(parts) < 6:
++                continue
++            # 行以 | 开头 ⇒ split 后 parts[0] 是空串，BV 在 parts[2]（与 对账补记.mjs 一致）
++            bv, status = parts[2], parts[-2]
++            if _BV_RE.fullmatch(bv) and status == "挑了":
++                got.add(bv)
++    except Exception:
++        pass
++    try:
++        for f in (DUTY_HOME / "out").glob("*.md"):
++            try:
++                txt = f.read_text(encoding="utf-8", errors="replace")
++            except Exception:
++                continue
++            for m in re.finditer(r"^#{2,3}\s*(BV[0-9A-Za-z]{10})", txt, re.M):
++                got.add(m.group(1))
++    except Exception:
++        pass
++    return got
++
++
++def _strip_duplicates(text: str):
++    """剔掉「以前推过」的行（也管本条私信内部的重复）。返回 (新文本, 被剔的 BV 列表)。
++
++    只按行剔：模型发的是 `[1] 标题 BV号 —— 理由` 这种一行一条，
++    整行删掉不会把句子删成半截；一行里有多个 BV 且只有部分是旧的，就整行留着不动。
++    """
++    seen = _delivered_bvids()
++    lines = text.splitlines()
++    if not seen and len(lines) < 2:
++        return text, []
++    local: set = set()
++    kept, dropped = [], []
++    for ln in lines:
++        bvs = _BV_RE.findall(ln)
++        if bvs and all((b in seen) or (b in local) for b in bvs):
++            dropped.extend(bvs)
++            continue
++        local.update(bvs)
++        kept.append(ln)
++    if not dropped:
++        return text, []
++    return "\n".join(kept).strip(), dropped
++
++
 +# ========== 发送前「链接体检」（2026-11-05 加）==========
 +# 起因：使用者报「第 4 条的链接和描述不匹配」——
 +#   私信里写《【东方原曲合集】793P》，链接却是 BV1ms411m7Pf，
@@ -220,10 +278,11 @@ index e555990..2722049 100755
  # ========== Tool 21: 发私信 ==========
  
  @tool()
-@@ -1170,6 +1365,21 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
+@@ -1169,6 +1424,38 @@
+ 
      if not text or not text.strip():
          return json.dumps({"success": False, "error": "text 不能为空"}, ensure_ascii=False)
- 
++
 +    # ⭐⭐ 2026-11-05：发出去之前过两道闸 —— 链接体检（BV 大小写）+ 投递闸门（你设的硬规则）
 +    try:
 +        bad = await _delivery_check(text.strip())
@@ -239,6 +298,22 @@ index e555990..2722049 100755
 +                    "或者把标题改成链接实际指向的那个视频。改完重新调一次 bili_send_message。",
 +        }, ensure_ascii=False)
 +
++    # ⭐⭐ 2026-11-08：第三道闸 —— 同一个视频不重复推（剔行；剔光了就整条不发）
++    try:
++        _t2, _dup = _strip_duplicates(text.strip())
++        if _dup:
++            _uniq = list(dict.fromkeys(_dup))
++            if not _BV_RE.search(_t2):
++                return json.dumps({
++                    "success": False,
++                    "error": f"这条私信里的 {len(_uniq)} 个视频**以前都推过了** ⇒ 没发：" + "、".join(_uniq),
++                    "hint": "换没推过的视频再发。判重表里标「挑了」的、以及往期日报里出现过 ### 行的，都算推过；"
++                            "「跳过」的不算。",
++                }, ensure_ascii=False)
++            print(f"[bili-duty] 去重：剔掉 {len(_dup)} 行已推过的（{'、'.join(_uniq)}）", file=sys.stderr)
++            text = _t2
++    except Exception as e:
++        print(f"[bili-duty] 去重检查出错（已放行）：{e}", file=sys.stderr)
+ 
      try:
          result = await session.send_msg(
-             credential=cred,

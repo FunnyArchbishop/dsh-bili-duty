@@ -1166,6 +1166,66 @@ async def bili_favorite_content(media_id: int, page: int = 1, keyword: str = "")
     }, ensure_ascii=False)
 
 
+# ========== 发送前「重复投递」检查（2026-11-08 加）==========
+# 为什么要在代码里拦：章程只让模型 duty_seen_recent(limit=40) 查最近 40 条，
+# 而判重表里已经有 110 条「挑了」⇒ 更早的它看不到；靠"自觉判重"迟早重复推。
+_BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
+
+
+def _delivered_bvids() -> set:
+    """历史上**推送过**的 BV：判重表标了「挑了」的 + 任何一天日报里的 ### 行。
+
+    ⚠️「跳过」不算推过 —— 那只是没挑，下次还该有机会。
+    """
+    got: set = set()
+    try:
+        for line in (DUTY_HOME / "seen.md").read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 6:
+                continue
+            # 行以 | 开头 ⇒ split 后 parts[0] 是空串，BV 在 parts[2]（与 对账补记.mjs 一致）
+            bv, status = parts[2], parts[-2]
+            if _BV_RE.fullmatch(bv) and status == "挑了":
+                got.add(bv)
+    except Exception:
+        pass
+    try:
+        for f in (DUTY_HOME / "out").glob("*.md"):
+            try:
+                txt = f.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for m in re.finditer(r"^#{2,3}\s*(BV[0-9A-Za-z]{10})", txt, re.M):
+                got.add(m.group(1))
+    except Exception:
+        pass
+    return got
+
+
+def _strip_duplicates(text: str):
+    """剔掉「以前推过」的行（也管本条私信内部的重复）。返回 (新文本, 被剔的 BV 列表)。
+
+    只按行剔：模型发的是 `[1] 标题 BV号 —— 理由` 这种一行一条，
+    整行删掉不会把句子删成半截；一行里有多个 BV 且只有部分是旧的，就整行留着不动。
+    """
+    seen = _delivered_bvids()
+    lines = text.splitlines()
+    if not seen and len(lines) < 2:
+        return text, []
+    local: set = set()
+    kept, dropped = [], []
+    for ln in lines:
+        bvs = _BV_RE.findall(ln)
+        if bvs and all((b in seen) or (b in local) for b in bvs):
+            dropped.extend(bvs)
+            continue
+        local.update(bvs)
+        kept.append(ln)
+    if not dropped:
+        return text, []
+    return "\n".join(kept).strip(), dropped
+
+
 # ========== 发送前「链接体检」（2026-11-05 加）==========
 # 起因：使用者报「第 4 条的链接和描述不匹配」——
 #   私信里写《【东方原曲合集】793P》，链接却是 BV1ms411m7Pf，
@@ -1379,6 +1439,23 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
                     "请回到 bili_search / bili_subtitle / bili_frames 的返回里**逐字复制**正确的 BV 再写，"
                     "或者把标题改成链接实际指向的那个视频。改完重新调一次 bili_send_message。",
         }, ensure_ascii=False)
+
+    # ⭐⭐ 2026-11-08：第三道闸 —— 同一个视频不重复推（剔行；剔光了就整条不发）
+    try:
+        _t2, _dup = _strip_duplicates(text.strip())
+        if _dup:
+            _uniq = list(dict.fromkeys(_dup))
+            if not _BV_RE.search(_t2):
+                return json.dumps({
+                    "success": False,
+                    "error": f"这条私信里的 {len(_uniq)} 个视频**以前都推过了** ⇒ 没发：" + "、".join(_uniq),
+                    "hint": "换没推过的视频再发。判重表里标「挑了」的、以及往期日报里出现过 ### 行的，都算推过；"
+                            "「跳过」的不算。",
+                }, ensure_ascii=False)
+            print(f"[bili-duty] 去重：剔掉 {len(_dup)} 行已推过的（{'、'.join(_uniq)}）", file=sys.stderr)
+            text = _t2
+    except Exception as e:
+        print(f"[bili-duty] 去重检查出错（已放行）：{e}", file=sys.stderr)
 
     try:
         result = await session.send_msg(
