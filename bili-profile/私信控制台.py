@@ -571,7 +571,13 @@ def build_give_prompt(n: int) -> str:
     ]
     if ex:
         tail.append(f"⛔ 排除词（先过这一关）：{'、'.join(ex)} —— 标题/UP名/简介里出现这些词的整条跳过。")
-    if str(cfg.get("dmMode") or "") == "only":
+    dm_mode = str(cfg.get("dmMode") or "")
+    dm_uid = cfg.get("dmUid") or cfg.get("dmOwnerUid")
+    if dm_uid:
+        tail.append(
+            f"⭐ 私信接收者 UID：{dm_uid} —— bili_send_message 的 receiver_uid **必须填这个数**，"
+            "填 0 或留空会被 B站 直接回 `-400 请求错误`（2026-11-10 实测：整批私信全废）。")
+    if dm_mode == "only":
         tail.append("投递：只私信（发完不用评论）。")
     tail.append(
         f"挑完把 {n} 条一次性私信发给我：每条给 BV 号 + 标题 + 一句为什么值得看。"
