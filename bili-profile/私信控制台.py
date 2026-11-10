@@ -579,6 +579,9 @@ def build_give_prompt(n: int) -> str:
             "填 0 或留空会被 B站 直接回 `-400 请求错误`（2026-11-10 实测：整批私信全废）。")
     if dm_mode == "only":
         tail.append("投递：只私信（发完不用评论）。")
+    if cfg.get("replyToComments"):
+        tail.append("⭐ 这一轮开头先调一次 bili_received_at_and_likes() 看有没有他发的 @；"
+                    "有就按章程那一节回到他那条评论下面（必须带 rpid，只回他一个人）。")
     tail.append(
         f"挑完把 {n} 条一次性私信发给我：每条给 BV 号 + 标题 + 一句为什么值得看。"
         "实在发不出去就把原因写进报告。")

@@ -1335,6 +1335,15 @@ function reportMeta() {
     //    用户以前开过自动评论、后来切到"只私信"，那个 true 还在 config 里 ⇒ 评论工具照样下发 ✗
     const dmOnly = String(cfg.dmMode || '').trim() === 'only'
     if (!dmOnly && (cfg.autoComment || cfg.replyToComments)) list.push('bili_reply')
+    // ⭐ 2026-11-10：评论区 @ 我 → 我在那条评论下面回他（只回使用者本人）。
+    //   这是**被动回复**（他发起、我应答），和"主动发评论"不是一回事 ⇒ 不受 dmOnly 限制，
+    //   由 replyToComments 单独控制开关。
+    //   · bili_received_at_and_likes：取「@我的」通知（含评论 rpid / 视频 BV / 正文）
+    //   · bili_reply：带 rpid 回复那条评论（rpid=0 发新评论的行为由章程明令禁止）
+    //   ⚠️ 故意不放 bili_received_replies（回复我的）—— 那条会引入"回别人"的风险。
+    if (cfg.replyToComments) {
+      list.push('bili_received_at_and_likes', 'bili_reply')
+    }
     // ⭐ 2026-10-19（issue #25 / #16 的实证，做法参考社区 PR #37）：私信开着却忘了给 bili_send_message ⇒
     //   模型手里压根没有这只工具 ⇒ 表现成"开关也开了、这一轮也跑了，但从来没发出去过" ✗
     //   ⇒ dmMode 不是 off、且填了收件人 UID 才放进去（关着就不给，白名单别松）
