@@ -1172,25 +1172,59 @@ async def bili_favorite_content(media_id: int, page: int = 1, keyword: str = "")
 _BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
 
 
-def _delivered_bvids() -> set:
-    """历史上**推送过**的 BV：判重表标了「挑了」的 + 任何一天日报里的 ### 行。
+def _duty_today_str() -> str:
+    """北京时间的今天（YYYY-MM-DD）。"""
+    return (_dt.datetime.utcnow() + _dt.timedelta(hours=8)).strftime("%Y-%m-%d")
 
+
+def _sent_file():
+    """真正发成功过的 BV 记在这里（DUTY_HOME 在本文件后半段才定义，所以现算）。"""
+    return DUTY_HOME / "sent-bvids.txt"
+
+
+def _delivered_bvids() -> set:
+    """「已经推送过」的 BV。
+
+    三个来源：
+      1. sent-bvids.txt —— 真正发成功过的（最准，含今天发过的）；
+      2. 判重表里状态是「挑了」的，**排除今天**（今天那条可能是本轮刚写的）；
+      3. 日报里的 ### 行，**排除今天的日报**（同理）。
+
+    ⚠️ 为什么必须排除今天：章程要求的顺序是「报告 → 判重表 → 归档 → 私信」，
+       模型写完报告再发私信时，闸门会读到它自己刚写下的记录，
+       若把今天的也算进去 ⇒ 判定"以前推过" ⇒ 整条私信被挡回（2026-11-18 实测翻车）。
     ⚠️「跳过」不算推过 —— 那只是没挑，下次还该有机会。
     """
     got: set = set()
+    today = _duty_today_str()
+
+    # ① 真正发出去的（含今天）
+    try:
+        for ln in _sent_file().read_text(encoding="utf-8", errors="replace").splitlines():
+            s = ln.strip()
+            if _BV_RE.fullmatch(s):
+                got.add(s)
+    except Exception:
+        pass
+
+    # ② 判重表（排除今天）
     try:
         for line in (DUTY_HOME / "seen.md").read_text(encoding="utf-8", errors="replace").splitlines():
             parts = [p.strip() for p in line.split("|")]
             if len(parts) < 6:
                 continue
-            # 行以 | 开头 ⇒ split 后 parts[0] 是空串，BV 在 parts[2]（与 对账补记.mjs 一致）
-            bv, status = parts[2], parts[-2]
-            if _BV_RE.fullmatch(bv) and status == "挑了":
+            # 行以 | 开头 ⇒ split 后 parts[0] 是空串，BV 在 parts[2]
+            day, bv, status = parts[1], parts[2], parts[-2]
+            if _BV_RE.fullmatch(bv) and status == "挑了" and day != today:
                 got.add(bv)
     except Exception:
         pass
+
+    # ③ 日报（排除今天那份）
     try:
         for f in (DUTY_HOME / "out").glob("*.md"):
+            if f.stem == today:
+                continue
             try:
                 txt = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -1200,6 +1234,19 @@ def _delivered_bvids() -> set:
     except Exception:
         pass
     return got
+
+
+def _record_sent(text: str) -> None:
+    """发成功之后，把正文里的 BV 记进 sent-bvids.txt（去重闸的唯一可靠来源）。"""
+    try:
+        bvs = list(dict.fromkeys(_BV_RE.findall(text)))
+        if not bvs:
+            return
+        with _sent_file().open("a", encoding="utf-8") as f:
+            for bv in bvs:
+                f.write(bv + "\n")
+    except Exception:
+        pass
 
 
 def _strip_duplicates(text: str):
@@ -1483,6 +1530,7 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
                 "error": "接口回了成功，但**没有投递回执（msg_key）** ⇒ 可能没真正送到（常见于：对方不接受陌生人私信 / 被风控）",
                 "data": data,
             }, ensure_ascii=False)
+        _record_sent(text)          # ⭐ 记进 sent-bvids.txt：以后靠它判断"推过"
         return json.dumps({
             "success": True,
             "message": f"私信已投递（回执 {str(msg_key)[:12]}…）",
