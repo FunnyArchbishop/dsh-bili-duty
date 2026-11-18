@@ -599,11 +599,44 @@ def build_give_prompt(n: int) -> str:
     return "\n".join(head + [charter] + tail)
 
 
+def ensure_overlay_tools() -> None:
+    """按 config 把该下发的工具补进 overlay 的白名单（自愈）。
+
+    ⚠️ 为什么需要它：插件的 ensureOverlay() 只在**它自己起轮**时重写 overlay，
+       而我们关掉了插件的谷时窗口（noon/night=false）、全靠这里起轮
+       ⇒ 没人重写 overlay ⇒ 改了白名单也永远不生效
+       （2026-11-18 实测：index.js 里明明有 bili_received_at_and_likes，
+         overlay 还是 11-07 的旧版，值班轮手里根本没有那个工具）。
+    """
+    import re as _re
+    try:
+        cfg = read_json(CFG, {}) or {}
+        need = []
+        if cfg.get("replyToComments"):
+            need += ["bili_received_at_and_likes", "bili_reply"]
+        if not need or not OVERLAY.exists():
+            return
+        t = OVERLAY.read_text(encoding="utf-8")
+        m = _re.search(r"BILI_MCP_TOOLS:\s*'([^']*)'", t)
+        if not m:
+            return
+        cur = m.group(1).split(",")
+        add = [x for x in need if x not in cur]
+        if not add:
+            return
+        t = t[:m.start(1)] + ",".join(cur + add) + t[m.end(1):]
+        OVERLAY.write_text(t, encoding="utf-8")
+        append_log("overlay 白名单补齐：" + "、".join(add))
+    except Exception as e:
+        append_log(f"ensure_overlay_tools 出错（不影响起轮）：{e}")
+
+
 def spawn_round(prompt: str) -> int:
     """起一轮值班，**不等它跑完**，返回 pid。
 
     一轮要 2~5 分钟；控制台每分钟扫一次，同步等会把扫描卡死。
     """
+    ensure_overlay_tools()          # 白名单自愈：别让改了 config 却不生效
     cmd = [NODE, DSH_BIN, "--profile", "bili-duty", "--patch", str(OVERLAY), prompt]
     env = {**os.environ, "BILI_DUTY_HOME": str(DUTY),
            "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
