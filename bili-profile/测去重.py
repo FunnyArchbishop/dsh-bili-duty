@@ -103,6 +103,23 @@ eq("「跳过」过的还能推", m._strip_duplicates(t4), (t4, []))
 t5 = "今天没有值得看的，休息一下。"
 eq("纯文字私信原样返回", m._strip_duplicates(t5), (t5, []))
 
+print("\n=== 8. 链接完整性（2026-11-20 截图反馈：有的条目没链接）===")
+OK_TEXT = ("[1] 标题甲\n"
+           "https://www.bilibili.com/video/BV1aaaaaaaaa · 理由\n"
+           "[2] 标题乙\n"
+           "https://www.bilibili.com/video/BV1zzzzzzzzz · 理由")
+eq("每条都有链接 → 不报缺", m._items_missing_link(OK_TEXT), [])
+BAD_TEXT = ("[1] 标题甲\n"
+            "https://www.bilibili.com/video/BV1aaaaaaaaa · 理由\n"
+            "[2] 标题乙\n"
+            "只有理由没链接\n"
+            "[3] 标题丙\n"
+            "BV1zzzzzzzzz · 理由")
+eq("缺链接的第 2 条被揪出来", m._items_missing_link(BAD_TEXT), [2])
+eq("BV 号也算链接", m._items_missing_link("[1] x\nBV1zzzzzzzzz · 理由"), [])
+eq("光有标题没链接", m._items_missing_link("[1] 只有标题"), [1])
+eq("编号重复也能各自校验", m._items_missing_link("[3] a\nBV1zzzzzzzzz\n[3] b"), [3])
+
 print(f"\n通过 {ok} · 失败 {fail}")
 if fail:
     sys.exit(1)

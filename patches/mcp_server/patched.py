@@ -1249,6 +1249,39 @@ def _record_sent(text: str) -> None:
         pass
 
 
+def _items_missing_link(text: str) -> list:
+    """每个 [N] 条目都必须带链接（BV 号或 bilibili.com）。返回缺链接的编号。
+
+    2026-11-20 用户截图反馈：私信里 [3]、[6] 没有链接，模型后来自己补发「[3] 补个链接」。
+    根因是 B站 把 URL 转卡片但仍占 40+ 字符，模型为省字符把链接砍了 ⇒ 必须硬拦。
+
+    判法：以 `[N]` 开头的行开启一个条目，该行以及它下面、下一个 `[N]` 之前的行里
+    出现 BV 号或 bilibili.com 就算有链接。
+    ⚠️ 用**列表**逐条记，不要用 dict —— 编号重复时 dict 会互相覆盖，查不出问题。
+    """
+    items = []                      # [(number, has_link)]
+    for ln in text.splitlines():
+        m = re.match(r"^\s*\[(\d{1,2})\]", ln)
+        if m:
+            items.append([int(m.group(1)),
+                          bool(_BV_RE.search(ln) or "bilibili.com" in ln)])
+        elif items:
+            if _BV_RE.search(ln) or "bilibili.com" in ln:
+                items[-1][1] = True
+    return [n for n, ok in items if not ok]
+
+
+def _dup_numbers(text: str) -> list:
+    """同一轮里重复出现的 `[N]` 编号（章程禁止：会让使用者打分对不上号）。"""
+    nums = [int(x) for x in re.findall(r"^\s*\[(\d{1,2})\]", text, re.M)]
+    seen, dup = set(), set()
+    for n in nums:
+        if n in seen:
+            dup.add(n)
+        seen.add(n)
+    return sorted(dup)
+
+
 def _strip_duplicates(text: str):
     """剔掉「以前推过」的行（也管本条私信内部的重复）。返回 (新文本, 被剔的 BV 列表)。
 
@@ -1503,6 +1536,28 @@ async def bili_send_message(receiver_uid: int, text: str) -> str:
             text = _t2
     except Exception as e:
         print(f"[bili-duty] 去重检查出错（已放行）：{e}", file=sys.stderr)
+
+    # ⭐⭐ 2026-11-20：第四道闸 —— 每条都必须带链接（使用者要能点进去）
+    try:
+        _missing = _items_missing_link(text.strip())
+        _dups = _dup_numbers(text.strip())
+        if _dups:
+            return json.dumps({
+                "success": False,
+                "error": f"编号重复：{''.join('[%d] ' % d for d in _dups)}出现了不止一次 ⇒ 这条私信没发。",
+                "hint": "一条私信里的 [N] 必须连续且唯一。补链接用 `[3] https://…` 的**续行**写法，"
+                        "不要又起一个 [3]；要发更多条就分多条私信、编号接着往下编。",
+            }, ensure_ascii=False)
+        if _missing:
+            return json.dumps({
+                "success": False,
+                "error": f"第 {'、'.join(map(str, _missing))} 条**没有链接** ⇒ 这条私信没发。",
+                "hint": "每条必须写成两行：第一行 `[N] 标题`，第二行 `<链接> · 理由≤20字`；"
+                        "**砍理由也绝不能砍链接**（URL 会被 B站 转成卡片，但少了它使用者就点不进去）。"
+                        "如果一条私信装不下，就把数量降到 4 条以内重发，别硬塞。",
+            }, ensure_ascii=False)
+    except Exception as e:
+        print(f"[bili-duty] 链接完整性检查出错（已放行）：{e}", file=sys.stderr)
 
     try:
         result = await session.send_msg(

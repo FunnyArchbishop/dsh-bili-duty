@@ -709,7 +709,8 @@ def cmd_give(args: list[str]) -> str:
 #     就把当天 noon/night 标记全吃掉，白天再也不会跑（11-07 整天没发就是这个）。
 # 所以关掉插件那两个开关（config.json: noon/night = false），改由这里按点起轮。
 AUTO_SEND_TIMES = ["11:30", "21:30"]   # 中午场 / 深夜场开始之前
-AUTO_SEND_PER = 8                      # 每次挑几条
+AUTO_SEND_PER = 4                      # 每次挑几条（4 条 ≈ 360 字符，一条私信装得下，
+                                       #   不用分批 ⇒ 不会有编号重复/链接被砍）
 AUTO_SEND_GRACE_MIN = 90               # 错过时间点后多久内仍补发（休眠/关机回来还赶得上）
 
 
