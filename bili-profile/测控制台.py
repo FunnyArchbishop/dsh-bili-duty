@@ -161,7 +161,8 @@ def _at(h, mi):
 
 
 eq("两个时间点", m.AUTO_SEND_TIMES, ["11:30", "21:30"])
-eq("每次条数（4 条 = 一条私信装得下，不用分批）", m.AUTO_SEND_PER, 4)
+eq("每次条数（用户指定 10 条）", m.AUTO_SEND_PER, 10)
+eq("分几条私信发（用户指定 4 条）", m.AUTO_SEND_MSGS, 4)
 eq("11:29 还没到", m._auto_send_due(_at(11, 29), []), None)
 eq("11:30 到点", m._auto_send_due(_at(11, 30), []), "11:30")
 eq("12:59 仍在宽限内（休眠回来赶得上）", m._auto_send_due(_at(12, 59), []), "11:30")

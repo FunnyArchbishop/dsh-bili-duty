@@ -584,8 +584,26 @@ def build_give_prompt(n: int) -> str:
     if cfg.get("replyToComments"):
         tail.append("⭐ 这一轮开头先调一次 bili_received_at_and_likes() 看有没有他发的 @；"
                     "有就按章程那一节回到他那条评论下面（必须带 rpid，只回他一个人）。")
+    if n > 4:
+        # 尽量均分：10 条 4 条私信 → 3/3/2/2（别出现「最后一条只剩 1 个」）
+        base, extra = divmod(n, AUTO_SEND_MSGS)
+        plan = []
+        cur = 1
+        for i in range(AUTO_SEND_MSGS):
+            cnt = base + (1 if i < extra else 0)
+            if cnt <= 0:
+                break
+            last = cur + cnt - 1
+            plan.append(f"第{i + 1}条 [{cur}]-[{last}]")
+            cur = last + 1
+        tail.append(
+            f"⭐ 私信**分 {AUTO_SEND_MSGS} 条**发（每条 {base + (1 if extra else 0)} 个视频以内，B站 单条上限约 500 字）："
+            + "；".join(plan) + "。")
+        tail.append(
+            f"⭐⭐ 编号 `[1]`~`[{n}]` 必须**跨消息连续、不重复、不跳号**（第 2 条私信接着上一条的号往下编），"
+            "最后一条末尾附打分邀请。")
     tail.append(
-        f"挑完把 {n} 条一次性私信发给我：每条给 BV 号 + 标题 + 一句为什么值得看。"
+        f"挑完把 {n} 条私信发给我：每条给 BV 号 + 标题 + 一句为什么值得看，**每条都必须带链接**。"
         "实在发不出去就把原因写进报告。")
 
     try:
@@ -773,8 +791,8 @@ def cmd_give(args: list[str]) -> str:
 #     就把当天 noon/night 标记全吃掉，白天再也不会跑（11-07 整天没发就是这个）。
 # 所以关掉插件那两个开关（config.json: noon/night = false），改由这里按点起轮。
 AUTO_SEND_TIMES = ["11:30", "21:30"]   # 中午场 / 深夜场开始之前
-AUTO_SEND_PER = 4                      # 每次挑几条（4 条 ≈ 360 字符，一条私信装得下，
-                                       #   不用分批 ⇒ 不会有编号重复/链接被砍）
+AUTO_SEND_PER = 10                     # 每次挑几条（用户 2026-11-25 指定 10 条）
+AUTO_SEND_MSGS = 4                     # 这 10 条要分几条私信发（每条 2~3 个视频，编号跨消息连续）
 AUTO_SEND_GRACE_MIN = 90               # 错过时间点后多久内仍补发（休眠/关机回来还赶得上）
 
 
