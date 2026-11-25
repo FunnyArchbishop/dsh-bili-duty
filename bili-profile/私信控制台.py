@@ -631,11 +631,40 @@ def ensure_overlay_tools() -> None:
         append_log(f"ensure_overlay_tools 出错（不影响起轮）：{e}")
 
 
+DUTY_PROFILE_PATCH = (pathlib.Path.home() / ".dsh" / "profiles" / "bili-duty"
+                       / "cordis.patch.yml")
+
+
+def ensure_duty_profile() -> None:
+    """自愈：确保值班 profile 里有 `workflow-worker-thread: disabled: true`。
+
+    ⚠️ 为什么需要：插件的 ensureDutyProfile() 启动时会铺 profile，
+       会把我们手工加的这条覆盖掉（2026-11-25 实测：文件退回 10-30 的 96 行版本）。
+       一旦缺了它，那一轮在插件树加载阶段就挂：
+           @deepseek-ai/dsh-workflow-worker-thread: pending (waiting for service: subagents)
+       症状是 out/ 里连续几天没有日报、一条私信都没有。
+    """
+    try:
+        if not DUTY_PROFILE_PATCH.exists():
+            return
+        t = DUTY_PROFILE_PATCH.read_text(encoding="utf-8")
+        if "workflow-worker-thread" in t:
+            return
+        t = t.rstrip("\n") + (
+            "\n# 自愈补回（2026-11-25）：少了这条值班轮会在插件树加载阶段挂掉\n"
+            "- id: workflow-worker-thread\n  disabled: true\n")
+        DUTY_PROFILE_PATCH.write_text(t, encoding="utf-8")
+        append_log("值班 profile 补回 workflow-worker-thread: disabled: true")
+    except Exception as e:
+        append_log(f"ensure_duty_profile 出错（不影响起轮）：{e}")
+
+
 def spawn_round(prompt: str) -> int:
     """起一轮值班，**不等它跑完**，返回 pid。
 
     一轮要 2~5 分钟；控制台每分钟扫一次，同步等会把扫描卡死。
     """
+    ensure_duty_profile()           # profile 自愈：缺那条 ⇒ 整轮起不来
     ensure_overlay_tools()          # 白名单自愈：别让改了 config 却不生效
     cmd = [NODE, DSH_BIN, "--profile", "bili-duty", "--patch", str(OVERLAY), prompt]
     env = {**os.environ, "BILI_DUTY_HOME": str(DUTY),
