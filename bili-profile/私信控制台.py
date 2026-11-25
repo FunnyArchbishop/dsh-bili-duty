@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -659,11 +661,44 @@ def ensure_duty_profile() -> None:
         append_log(f"ensure_duty_profile 出错（不影响起轮）：{e}")
 
 
+PATCHED_MCP = pathlib.Path(__file__).resolve().parent.parent / "patches" / "mcp_server" / "patched.py"
+PKG_MCP = (pathlib.Path.home() / ".dsh" / "profiles" / "web" / "node_modules" / "dsh-bili-scroll"
+           / "vendor" / "bilibili-mcp" / "mcp_server.py")
+
+
+def ensure_mcp_patched() -> None:
+    """确保 mcp_server.py 是我们的补丁版。
+
+    ⚠️ 为什么需要：插件被重装/升级时，插件包和家目录两份 mcp_server.py 都会退回上游原版
+       —— 2026-11-25 实测两份都是 10-29 的原版 ⇒ 去重闸、链接完整性闸、编号重复闸
+       **全部失效**（用户反馈的"缺链接/编号乱"又回来了），sent-bvids.txt 也不再更新。
+    ⚠️ 两处都要铺：插件启动时 ensureHomeFiles 会用包里那份覆盖家目录。
+    """
+    try:
+        if not PATCHED_MCP.exists():
+            return
+        want = hashlib.sha256(PATCHED_MCP.read_bytes()).hexdigest()
+        fixed = []
+        for target in (DUTY / "mcp_server.py", PKG_MCP):
+            try:
+                if target.exists() and hashlib.sha256(target.read_bytes()).hexdigest() == want:
+                    continue
+                shutil.copy2(PATCHED_MCP, target)
+                fixed.append(target.name)
+            except Exception:
+                continue
+        if fixed:
+            append_log("mcp_server.py 被覆盖过，已重新铺成补丁版")
+    except Exception as e:
+        append_log(f"ensure_mcp_patched 出错（不影响起轮）：{e}")
+
+
 def spawn_round(prompt: str) -> int:
     """起一轮值班，**不等它跑完**，返回 pid。
 
     一轮要 2~5 分钟；控制台每分钟扫一次，同步等会把扫描卡死。
     """
+    ensure_mcp_patched()            # 补丁自愈：插件重装会把 mcp_server.py 冲回原版
     ensure_duty_profile()           # profile 自愈：缺那条 ⇒ 整轮起不来
     ensure_overlay_tools()          # 白名单自愈：别让改了 config 却不生效
     cmd = [NODE, DSH_BIN, "--profile", "bili-duty", "--patch", str(OVERLAY), prompt]
